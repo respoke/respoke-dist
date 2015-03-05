@@ -1,7 +1,8 @@
 # Respoke.js distribution repo
 
 This repo exists to support [Bower](http://bower.io) by providing a pre-built
-version of Respoke.js.
+version of Respoke.js. The full documentation and source can be see at the real
+[Respoke.js repo](https://github.com/respoke/respoke).
 
 ## Usage
 
