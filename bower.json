@@ -15,7 +15,7 @@
     "audio"
   ],
   "authors": [
-    "Matthew Turney <mturney@digium.com>"
+    "Respoke <support@respoke.io>"
   ],
   "description": "Client-side JavaScript library for Respoke.",
   "moduleType": [
