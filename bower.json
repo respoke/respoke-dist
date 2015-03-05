@@ -1,10 +1,7 @@
 {
   "name": "respoke",
   "version": "1.21.0",
-  "main": [
-    "respoke.min.js",
-    "respoke.min.map"
-  ],
+  "main": "respoke.min.js",
   "keywords": [
     "respoke",
     "webrtc",
