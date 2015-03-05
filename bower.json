@@ -1,0 +1,26 @@
+{
+  "name": "respoke",
+  "version": "1.21.0",
+  "main": [
+    "respoke.min.js",
+    "respoke.min.map"
+  ],
+  "keywords": [
+    "respoke",
+    "webrtc",
+    "screenshare",
+    "communications",
+    "chat",
+    "video",
+    "audio"
+  ],
+  "authors": [
+    "Matthew Turney <mturney@digium.com>"
+  ],
+  "description": "Client-side JavaScript library for Respoke.",
+  "moduleType": [
+    "globals"
+  ],
+  "license": "MIT",
+  "homepage": "https://www.respoke.io"
+}
