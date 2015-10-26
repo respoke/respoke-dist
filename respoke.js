@@ -192,9 +192,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	var EventEmitter = __webpack_require__(4);
 	var respoke = module.exports = EventEmitter({
 	    ridiculous: false, // print every websocket tx/rx
-	    buildNumber: 'v1.52.0',
+	    buildNumber: 'v1.54.0',
 	    streams: [],
-	    Q: __webpack_require__(6)
+	    io: __webpack_require__(6),
+	    Q: __webpack_require__(8)
 	});
 
 	respoke.Q.longStackSupport = true;
@@ -262,7 +263,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	        // expose native node-webkit chooseDesktopMedia (requires nw.js 0.12+)
 	        gui = window.nwDispatcher.requireNwGui();
 	        gui.Screen.Init();
-			
+
 	        respoke.chooseDesktopMedia = function (data, callback) {
 	            // make data param optional
 	            if (!callback && (typeof data === 'function')) {
@@ -312,13 +313,13 @@ return /******/ (function(modules) { // webpackBootstrap
 	respoke.log = log;
 	respoke.Class = __webpack_require__(5);
 	respoke.EventEmitter = EventEmitter;
-	respoke.Client = __webpack_require__(7);
-	respoke.Connection = __webpack_require__(8);
-	respoke.Endpoint = __webpack_require__(9);
-	respoke.TextMessage = __webpack_require__(10);
-	respoke.SignalingMessage = __webpack_require__(11);
-	respoke.Group = __webpack_require__(12);
-	respoke.SignalingChannel = __webpack_require__(13);
+	respoke.Client = __webpack_require__(9);
+	respoke.Connection = __webpack_require__(10);
+	respoke.Endpoint = __webpack_require__(11);
+	respoke.TextMessage = __webpack_require__(12);
+	respoke.SignalingMessage = __webpack_require__(13);
+	respoke.Group = __webpack_require__(14);
+	respoke.SignalingChannel = __webpack_require__(15);
 	respoke.DirectConnection = __webpack_require__(17);
 	respoke.PeerConnection = __webpack_require__(18);
 	respoke.CallState = __webpack_require__(20);
@@ -1687,8595 +1688,6 @@ return /******/ (function(modules) { // webpackBootstrap
 
 /***/ },
 /* 6 */
-/***/ function(module, exports, __webpack_require__) {
-
-	// vim:ts=4:sts=4:sw=4:
-	/*!
-	 *
-	 * Copyright 2009-2012 Kris Kowal under the terms of the MIT
-	 * license found at http://github.com/kriskowal/q/raw/master/LICENSE
-	 *
-	 * With parts by Tyler Close
-	 * Copyright 2007-2009 Tyler Close under the terms of the MIT X license found
-	 * at http://www.opensource.org/licenses/mit-license.html
-	 * Forked at ref_send.js version: 2009-05-11
-	 *
-	 * With parts by Mark Miller
-	 * Copyright (C) 2011 Google Inc.
-	 *
-	 * Licensed under the Apache License, Version 2.0 (the "License");
-	 * you may not use this file except in compliance with the License.
-	 * You may obtain a copy of the License at
-	 *
-	 * http://www.apache.org/licenses/LICENSE-2.0
-	 *
-	 * Unless required by applicable law or agreed to in writing, software
-	 * distributed under the License is distributed on an "AS IS" BASIS,
-	 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-	 * See the License for the specific language governing permissions and
-	 * limitations under the License.
-	 *
-	 */
-
-	(function (definition) {
-	    "use strict";
-
-	    // This file will function properly as a <script> tag, or a module
-	    // using CommonJS and NodeJS or RequireJS module formats.  In
-	    // Common/Node/RequireJS, the module exports the Q API and when
-	    // executed as a simple <script>, it creates a Q global instead.
-
-	    // Montage Require
-	    if (typeof bootstrap === "function") {
-	        bootstrap("promise", definition);
-
-	    // CommonJS
-	    } else if (true) {
-	        module.exports = definition();
-
-	    // RequireJS
-	    } else if (typeof define === "function" && define.amd) {
-	        define(definition);
-
-	    // SES (Secure EcmaScript)
-	    } else if (typeof ses !== "undefined") {
-	        if (!ses.ok()) {
-	            return;
-	        } else {
-	            ses.makeQ = definition;
-	        }
-
-	    // <script>
-	    } else if (typeof self !== "undefined") {
-	        self.Q = definition();
-
-	    } else {
-	        throw new Error("This environment was not anticipated by Q. Please file a bug.");
-	    }
-
-	})(function () {
-	"use strict";
-
-	var hasStacks = false;
-	try {
-	    throw new Error();
-	} catch (e) {
-	    hasStacks = !!e.stack;
-	}
-
-	// All code after this point will be filtered from stack traces reported
-	// by Q.
-	var qStartingLine = captureLine();
-	var qFileName;
-
-	// shims
-
-	// used for fallback in "allResolved"
-	var noop = function () {};
-
-	// Use the fastest possible means to execute a task in a future turn
-	// of the event loop.
-	var nextTick =(function () {
-	    // linked list of tasks (single, with head node)
-	    var head = {task: void 0, next: null};
-	    var tail = head;
-	    var flushing = false;
-	    var requestTick = void 0;
-	    var isNodeJS = false;
-	    // queue for late tasks, used by unhandled rejection tracking
-	    var laterQueue = [];
-
-	    function flush() {
-	        /* jshint loopfunc: true */
-	        var task, domain;
-
-	        while (head.next) {
-	            head = head.next;
-	            task = head.task;
-	            head.task = void 0;
-	            domain = head.domain;
-
-	            if (domain) {
-	                head.domain = void 0;
-	                domain.enter();
-	            }
-	            runSingle(task, domain);
-
-	        }
-	        while (laterQueue.length) {
-	            task = laterQueue.pop();
-	            runSingle(task);
-	        }
-	        flushing = false;
-	    }
-	    // runs a single function in the async queue
-	    function runSingle(task, domain) {
-	        try {
-	            task();
-
-	        } catch (e) {
-	            if (isNodeJS) {
-	                // In node, uncaught exceptions are considered fatal errors.
-	                // Re-throw them synchronously to interrupt flushing!
-
-	                // Ensure continuation if the uncaught exception is suppressed
-	                // listening "uncaughtException" events (as domains does).
-	                // Continue in next event to avoid tick recursion.
-	                if (domain) {
-	                    domain.exit();
-	                }
-	                setTimeout(flush, 0);
-	                if (domain) {
-	                    domain.enter();
-	                }
-
-	                throw e;
-
-	            } else {
-	                // In browsers, uncaught exceptions are not fatal.
-	                // Re-throw them asynchronously to avoid slow-downs.
-	                setTimeout(function () {
-	                    throw e;
-	                }, 0);
-	            }
-	        }
-
-	        if (domain) {
-	            domain.exit();
-	        }
-	    }
-
-	    nextTick = function (task) {
-	        tail = tail.next = {
-	            task: task,
-	            domain: isNodeJS && process.domain,
-	            next: null
-	        };
-
-	        if (!flushing) {
-	            flushing = true;
-	            requestTick();
-	        }
-	    };
-
-	    if (typeof process === "object" &&
-	        process.toString() === "[object process]" && process.nextTick) {
-	        // Ensure Q is in a real Node environment, with a `process.nextTick`.
-	        // To see through fake Node environments:
-	        // * Mocha test runner - exposes a `process` global without a `nextTick`
-	        // * Browserify - exposes a `process.nexTick` function that uses
-	        //   `setTimeout`. In this case `setImmediate` is preferred because
-	        //    it is faster. Browserify's `process.toString()` yields
-	        //   "[object Object]", while in a real Node environment
-	        //   `process.nextTick()` yields "[object process]".
-	        isNodeJS = true;
-
-	        requestTick = function () {
-	            process.nextTick(flush);
-	        };
-
-	    } else if (typeof setImmediate === "function") {
-	        // In IE10, Node.js 0.9+, or https://github.com/NobleJS/setImmediate
-	        if (typeof window !== "undefined") {
-	            requestTick = setImmediate.bind(window, flush);
-	        } else {
-	            requestTick = function () {
-	                setImmediate(flush);
-	            };
-	        }
-
-	    } else if (typeof MessageChannel !== "undefined") {
-	        // modern browsers
-	        // http://www.nonblocking.io/2011/06/windownexttick.html
-	        var channel = new MessageChannel();
-	        // At least Safari Version 6.0.5 (8536.30.1) intermittently cannot create
-	        // working message ports the first time a page loads.
-	        channel.port1.onmessage = function () {
-	            requestTick = requestPortTick;
-	            channel.port1.onmessage = flush;
-	            flush();
-	        };
-	        var requestPortTick = function () {
-	            // Opera requires us to provide a message payload, regardless of
-	            // whether we use it.
-	            channel.port2.postMessage(0);
-	        };
-	        requestTick = function () {
-	            setTimeout(flush, 0);
-	            requestPortTick();
-	        };
-
-	    } else {
-	        // old browsers
-	        requestTick = function () {
-	            setTimeout(flush, 0);
-	        };
-	    }
-	    // runs a task after all other tasks have been run
-	    // this is useful for unhandled rejection tracking that needs to happen
-	    // after all `then`d tasks have been run.
-	    nextTick.runAfter = function (task) {
-	        laterQueue.push(task);
-	        if (!flushing) {
-	            flushing = true;
-	            requestTick();
-	        }
-	    };
-	    return nextTick;
-	})();
-
-	// Attempt to make generics safe in the face of downstream
-	// modifications.
-	// There is no situation where this is necessary.
-	// If you need a security guarantee, these primordials need to be
-	// deeply frozen anyway, and if you don’t need a security guarantee,
-	// this is just plain paranoid.
-	// However, this **might** have the nice side-effect of reducing the size of
-	// the minified code by reducing x.call() to merely x()
-	// See Mark Miller’s explanation of what this does.
-	// http://wiki.ecmascript.org/doku.php?id=conventions:safe_meta_programming
-	var call = Function.call;
-	function uncurryThis(f) {
-	    return function () {
-	        return call.apply(f, arguments);
-	    };
-	}
-	// This is equivalent, but slower:
-	// uncurryThis = Function_bind.bind(Function_bind.call);
-	// http://jsperf.com/uncurrythis
-
-	var array_slice = uncurryThis(Array.prototype.slice);
-
-	var array_reduce = uncurryThis(
-	    Array.prototype.reduce || function (callback, basis) {
-	        var index = 0,
-	            length = this.length;
-	        // concerning the initial value, if one is not provided
-	        if (arguments.length === 1) {
-	            // seek to the first value in the array, accounting
-	            // for the possibility that is is a sparse array
-	            do {
-	                if (index in this) {
-	                    basis = this[index++];
-	                    break;
-	                }
-	                if (++index >= length) {
-	                    throw new TypeError();
-	                }
-	            } while (1);
-	        }
-	        // reduce
-	        for (; index < length; index++) {
-	            // account for the possibility that the array is sparse
-	            if (index in this) {
-	                basis = callback(basis, this[index], index);
-	            }
-	        }
-	        return basis;
-	    }
-	);
-
-	var array_indexOf = uncurryThis(
-	    Array.prototype.indexOf || function (value) {
-	        // not a very good shim, but good enough for our one use of it
-	        for (var i = 0; i < this.length; i++) {
-	            if (this[i] === value) {
-	                return i;
-	            }
-	        }
-	        return -1;
-	    }
-	);
-
-	var array_map = uncurryThis(
-	    Array.prototype.map || function (callback, thisp) {
-	        var self = this;
-	        var collect = [];
-	        array_reduce(self, function (undefined, value, index) {
-	            collect.push(callback.call(thisp, value, index, self));
-	        }, void 0);
-	        return collect;
-	    }
-	);
-
-	var object_create = Object.create || function (prototype) {
-	    function Type() { }
-	    Type.prototype = prototype;
-	    return new Type();
-	};
-
-	var object_hasOwnProperty = uncurryThis(Object.prototype.hasOwnProperty);
-
-	var object_keys = Object.keys || function (object) {
-	    var keys = [];
-	    for (var key in object) {
-	        if (object_hasOwnProperty(object, key)) {
-	            keys.push(key);
-	        }
-	    }
-	    return keys;
-	};
-
-	var object_toString = uncurryThis(Object.prototype.toString);
-
-	function isObject(value) {
-	    return value === Object(value);
-	}
-
-	// generator related shims
-
-	// FIXME: Remove this function once ES6 generators are in SpiderMonkey.
-	function isStopIteration(exception) {
-	    return (
-	        object_toString(exception) === "[object StopIteration]" ||
-	        exception instanceof QReturnValue
-	    );
-	}
-
-	// FIXME: Remove this helper and Q.return once ES6 generators are in
-	// SpiderMonkey.
-	var QReturnValue;
-	if (typeof ReturnValue !== "undefined") {
-	    QReturnValue = ReturnValue;
-	} else {
-	    QReturnValue = function (value) {
-	        this.value = value;
-	    };
-	}
-
-	// long stack traces
-
-	var STACK_JUMP_SEPARATOR = "From previous event:";
-
-	function makeStackTraceLong(error, promise) {
-	    // If possible, transform the error stack trace by removing Node and Q
-	    // cruft, then concatenating with the stack trace of `promise`. See #57.
-	    if (hasStacks &&
-	        promise.stack &&
-	        typeof error === "object" &&
-	        error !== null &&
-	        error.stack &&
-	        error.stack.indexOf(STACK_JUMP_SEPARATOR) === -1
-	    ) {
-	        var stacks = [];
-	        for (var p = promise; !!p; p = p.source) {
-	            if (p.stack) {
-	                stacks.unshift(p.stack);
-	            }
-	        }
-	        stacks.unshift(error.stack);
-
-	        var concatedStacks = stacks.join("\n" + STACK_JUMP_SEPARATOR + "\n");
-	        error.stack = filterStackString(concatedStacks);
-	    }
-	}
-
-	function filterStackString(stackString) {
-	    var lines = stackString.split("\n");
-	    var desiredLines = [];
-	    for (var i = 0; i < lines.length; ++i) {
-	        var line = lines[i];
-
-	        if (!isInternalFrame(line) && !isNodeFrame(line) && line) {
-	            desiredLines.push(line);
-	        }
-	    }
-	    return desiredLines.join("\n");
-	}
-
-	function isNodeFrame(stackLine) {
-	    return stackLine.indexOf("(module.js:") !== -1 ||
-	           stackLine.indexOf("(node.js:") !== -1;
-	}
-
-	function getFileNameAndLineNumber(stackLine) {
-	    // Named functions: "at functionName (filename:lineNumber:columnNumber)"
-	    // In IE10 function name can have spaces ("Anonymous function") O_o
-	    var attempt1 = /at .+ \((.+):(\d+):(?:\d+)\)$/.exec(stackLine);
-	    if (attempt1) {
-	        return [attempt1[1], Number(attempt1[2])];
-	    }
-
-	    // Anonymous functions: "at filename:lineNumber:columnNumber"
-	    var attempt2 = /at ([^ ]+):(\d+):(?:\d+)$/.exec(stackLine);
-	    if (attempt2) {
-	        return [attempt2[1], Number(attempt2[2])];
-	    }
-
-	    // Firefox style: "function@filename:lineNumber or @filename:lineNumber"
-	    var attempt3 = /.*@(.+):(\d+)$/.exec(stackLine);
-	    if (attempt3) {
-	        return [attempt3[1], Number(attempt3[2])];
-	    }
-	}
-
-	function isInternalFrame(stackLine) {
-	    var fileNameAndLineNumber = getFileNameAndLineNumber(stackLine);
-
-	    if (!fileNameAndLineNumber) {
-	        return false;
-	    }
-
-	    var fileName = fileNameAndLineNumber[0];
-	    var lineNumber = fileNameAndLineNumber[1];
-
-	    return fileName === qFileName &&
-	        lineNumber >= qStartingLine &&
-	        lineNumber <= qEndingLine;
-	}
-
-	// discover own file name and line number range for filtering stack
-	// traces
-	function captureLine() {
-	    if (!hasStacks) {
-	        return;
-	    }
-
-	    try {
-	        throw new Error();
-	    } catch (e) {
-	        var lines = e.stack.split("\n");
-	        var firstLine = lines[0].indexOf("@") > 0 ? lines[1] : lines[2];
-	        var fileNameAndLineNumber = getFileNameAndLineNumber(firstLine);
-	        if (!fileNameAndLineNumber) {
-	            return;
-	        }
-
-	        qFileName = fileNameAndLineNumber[0];
-	        return fileNameAndLineNumber[1];
-	    }
-	}
-
-	function deprecate(callback, name, alternative) {
-	    return function () {
-	        if (typeof console !== "undefined" &&
-	            typeof console.warn === "function") {
-	            console.warn(name + " is deprecated, use " + alternative +
-	                         " instead.", new Error("").stack);
-	        }
-	        return callback.apply(callback, arguments);
-	    };
-	}
-
-	// end of shims
-	// beginning of real work
-
-	/**
-	 * Constructs a promise for an immediate reference, passes promises through, or
-	 * coerces promises from different systems.
-	 * @param value immediate reference or promise
-	 */
-	function Q(value) {
-	    // If the object is already a Promise, return it directly.  This enables
-	    // the resolve function to both be used to created references from objects,
-	    // but to tolerably coerce non-promises to promises.
-	    if (value instanceof Promise) {
-	        return value;
-	    }
-
-	    // assimilate thenables
-	    if (isPromiseAlike(value)) {
-	        return coerce(value);
-	    } else {
-	        return fulfill(value);
-	    }
-	}
-	Q.resolve = Q;
-
-	/**
-	 * Performs a task in a future turn of the event loop.
-	 * @param {Function} task
-	 */
-	Q.nextTick = nextTick;
-
-	/**
-	 * Controls whether or not long stack traces will be on
-	 */
-	Q.longStackSupport = false;
-
-	// enable long stacks if Q_DEBUG is set
-	if (typeof process === "object" && process && process.env && process.env.Q_DEBUG) {
-	    Q.longStackSupport = true;
-	}
-
-	/**
-	 * Constructs a {promise, resolve, reject} object.
-	 *
-	 * `resolve` is a callback to invoke with a more resolved value for the
-	 * promise. To fulfill the promise, invoke `resolve` with any value that is
-	 * not a thenable. To reject the promise, invoke `resolve` with a rejected
-	 * thenable, or invoke `reject` with the reason directly. To resolve the
-	 * promise to another thenable, thus putting it in the same state, invoke
-	 * `resolve` with that other thenable.
-	 */
-	Q.defer = defer;
-	function defer() {
-	    // if "messages" is an "Array", that indicates that the promise has not yet
-	    // been resolved.  If it is "undefined", it has been resolved.  Each
-	    // element of the messages array is itself an array of complete arguments to
-	    // forward to the resolved promise.  We coerce the resolution value to a
-	    // promise using the `resolve` function because it handles both fully
-	    // non-thenable values and other thenables gracefully.
-	    var messages = [], progressListeners = [], resolvedPromise;
-
-	    var deferred = object_create(defer.prototype);
-	    var promise = object_create(Promise.prototype);
-
-	    promise.promiseDispatch = function (resolve, op, operands) {
-	        var args = array_slice(arguments);
-	        if (messages) {
-	            messages.push(args);
-	            if (op === "when" && operands[1]) { // progress operand
-	                progressListeners.push(operands[1]);
-	            }
-	        } else {
-	            Q.nextTick(function () {
-	                resolvedPromise.promiseDispatch.apply(resolvedPromise, args);
-	            });
-	        }
-	    };
-
-	    // XXX deprecated
-	    promise.valueOf = function () {
-	        if (messages) {
-	            return promise;
-	        }
-	        var nearerValue = nearer(resolvedPromise);
-	        if (isPromise(nearerValue)) {
-	            resolvedPromise = nearerValue; // shorten chain
-	        }
-	        return nearerValue;
-	    };
-
-	    promise.inspect = function () {
-	        if (!resolvedPromise) {
-	            return { state: "pending" };
-	        }
-	        return resolvedPromise.inspect();
-	    };
-
-	    if (Q.longStackSupport && hasStacks) {
-	        try {
-	            throw new Error();
-	        } catch (e) {
-	            // NOTE: don't try to use `Error.captureStackTrace` or transfer the
-	            // accessor around; that causes memory leaks as per GH-111. Just
-	            // reify the stack trace as a string ASAP.
-	            //
-	            // At the same time, cut off the first line; it's always just
-	            // "[object Promise]\n", as per the `toString`.
-	            promise.stack = e.stack.substring(e.stack.indexOf("\n") + 1);
-	        }
-	    }
-
-	    // NOTE: we do the checks for `resolvedPromise` in each method, instead of
-	    // consolidating them into `become`, since otherwise we'd create new
-	    // promises with the lines `become(whatever(value))`. See e.g. GH-252.
-
-	    function become(newPromise) {
-	        resolvedPromise = newPromise;
-	        promise.source = newPromise;
-
-	        array_reduce(messages, function (undefined, message) {
-	            Q.nextTick(function () {
-	                newPromise.promiseDispatch.apply(newPromise, message);
-	            });
-	        }, void 0);
-
-	        messages = void 0;
-	        progressListeners = void 0;
-	    }
-
-	    deferred.promise = promise;
-	    deferred.resolve = function (value) {
-	        if (resolvedPromise) {
-	            return;
-	        }
-
-	        become(Q(value));
-	    };
-
-	    deferred.fulfill = function (value) {
-	        if (resolvedPromise) {
-	            return;
-	        }
-
-	        become(fulfill(value));
-	    };
-	    deferred.reject = function (reason) {
-	        if (resolvedPromise) {
-	            return;
-	        }
-
-	        become(reject(reason));
-	    };
-	    deferred.notify = function (progress) {
-	        if (resolvedPromise) {
-	            return;
-	        }
-
-	        array_reduce(progressListeners, function (undefined, progressListener) {
-	            Q.nextTick(function () {
-	                progressListener(progress);
-	            });
-	        }, void 0);
-	    };
-
-	    return deferred;
-	}
-
-	/**
-	 * Creates a Node-style callback that will resolve or reject the deferred
-	 * promise.
-	 * @returns a nodeback
-	 */
-	defer.prototype.makeNodeResolver = function () {
-	    var self = this;
-	    return function (error, value) {
-	        if (error) {
-	            self.reject(error);
-	        } else if (arguments.length > 2) {
-	            self.resolve(array_slice(arguments, 1));
-	        } else {
-	            self.resolve(value);
-	        }
-	    };
-	};
-
-	/**
-	 * @param resolver {Function} a function that returns nothing and accepts
-	 * the resolve, reject, and notify functions for a deferred.
-	 * @returns a promise that may be resolved with the given resolve and reject
-	 * functions, or rejected by a thrown exception in resolver
-	 */
-	Q.Promise = promise; // ES6
-	Q.promise = promise;
-	function promise(resolver) {
-	    if (typeof resolver !== "function") {
-	        throw new TypeError("resolver must be a function.");
-	    }
-	    var deferred = defer();
-	    try {
-	        resolver(deferred.resolve, deferred.reject, deferred.notify);
-	    } catch (reason) {
-	        deferred.reject(reason);
-	    }
-	    return deferred.promise;
-	}
-
-	promise.race = race; // ES6
-	promise.all = all; // ES6
-	promise.reject = reject; // ES6
-	promise.resolve = Q; // ES6
-
-	// XXX experimental.  This method is a way to denote that a local value is
-	// serializable and should be immediately dispatched to a remote upon request,
-	// instead of passing a reference.
-	Q.passByCopy = function (object) {
-	    //freeze(object);
-	    //passByCopies.set(object, true);
-	    return object;
-	};
-
-	Promise.prototype.passByCopy = function () {
-	    //freeze(object);
-	    //passByCopies.set(object, true);
-	    return this;
-	};
-
-	/**
-	 * If two promises eventually fulfill to the same value, promises that value,
-	 * but otherwise rejects.
-	 * @param x {Any*}
-	 * @param y {Any*}
-	 * @returns {Any*} a promise for x and y if they are the same, but a rejection
-	 * otherwise.
-	 *
-	 */
-	Q.join = function (x, y) {
-	    return Q(x).join(y);
-	};
-
-	Promise.prototype.join = function (that) {
-	    return Q([this, that]).spread(function (x, y) {
-	        if (x === y) {
-	            // TODO: "===" should be Object.is or equiv
-	            return x;
-	        } else {
-	            throw new Error("Can't join: not the same: " + x + " " + y);
-	        }
-	    });
-	};
-
-	/**
-	 * Returns a promise for the first of an array of promises to become settled.
-	 * @param answers {Array[Any*]} promises to race
-	 * @returns {Any*} the first promise to be settled
-	 */
-	Q.race = race;
-	function race(answerPs) {
-	    return promise(function (resolve, reject) {
-	        // Switch to this once we can assume at least ES5
-	        // answerPs.forEach(function (answerP) {
-	        //     Q(answerP).then(resolve, reject);
-	        // });
-	        // Use this in the meantime
-	        for (var i = 0, len = answerPs.length; i < len; i++) {
-	            Q(answerPs[i]).then(resolve, reject);
-	        }
-	    });
-	}
-
-	Promise.prototype.race = function () {
-	    return this.then(Q.race);
-	};
-
-	/**
-	 * Constructs a Promise with a promise descriptor object and optional fallback
-	 * function.  The descriptor contains methods like when(rejected), get(name),
-	 * set(name, value), post(name, args), and delete(name), which all
-	 * return either a value, a promise for a value, or a rejection.  The fallback
-	 * accepts the operation name, a resolver, and any further arguments that would
-	 * have been forwarded to the appropriate method above had a method been
-	 * provided with the proper name.  The API makes no guarantees about the nature
-	 * of the returned object, apart from that it is usable whereever promises are
-	 * bought and sold.
-	 */
-	Q.makePromise = Promise;
-	function Promise(descriptor, fallback, inspect) {
-	    if (fallback === void 0) {
-	        fallback = function (op) {
-	            return reject(new Error(
-	                "Promise does not support operation: " + op
-	            ));
-	        };
-	    }
-	    if (inspect === void 0) {
-	        inspect = function () {
-	            return {state: "unknown"};
-	        };
-	    }
-
-	    var promise = object_create(Promise.prototype);
-
-	    promise.promiseDispatch = function (resolve, op, args) {
-	        var result;
-	        try {
-	            if (descriptor[op]) {
-	                result = descriptor[op].apply(promise, args);
-	            } else {
-	                result = fallback.call(promise, op, args);
-	            }
-	        } catch (exception) {
-	            result = reject(exception);
-	        }
-	        if (resolve) {
-	            resolve(result);
-	        }
-	    };
-
-	    promise.inspect = inspect;
-
-	    // XXX deprecated `valueOf` and `exception` support
-	    if (inspect) {
-	        var inspected = inspect();
-	        if (inspected.state === "rejected") {
-	            promise.exception = inspected.reason;
-	        }
-
-	        promise.valueOf = function () {
-	            var inspected = inspect();
-	            if (inspected.state === "pending" ||
-	                inspected.state === "rejected") {
-	                return promise;
-	            }
-	            return inspected.value;
-	        };
-	    }
-
-	    return promise;
-	}
-
-	Promise.prototype.toString = function () {
-	    return "[object Promise]";
-	};
-
-	Promise.prototype.then = function (fulfilled, rejected, progressed) {
-	    var self = this;
-	    var deferred = defer();
-	    var done = false;   // ensure the untrusted promise makes at most a
-	                        // single call to one of the callbacks
-
-	    function _fulfilled(value) {
-	        try {
-	            return typeof fulfilled === "function" ? fulfilled(value) : value;
-	        } catch (exception) {
-	            return reject(exception);
-	        }
-	    }
-
-	    function _rejected(exception) {
-	        if (typeof rejected === "function") {
-	            makeStackTraceLong(exception, self);
-	            try {
-	                return rejected(exception);
-	            } catch (newException) {
-	                return reject(newException);
-	            }
-	        }
-	        return reject(exception);
-	    }
-
-	    function _progressed(value) {
-	        return typeof progressed === "function" ? progressed(value) : value;
-	    }
-
-	    Q.nextTick(function () {
-	        self.promiseDispatch(function (value) {
-	            if (done) {
-	                return;
-	            }
-	            done = true;
-
-	            deferred.resolve(_fulfilled(value));
-	        }, "when", [function (exception) {
-	            if (done) {
-	                return;
-	            }
-	            done = true;
-
-	            deferred.resolve(_rejected(exception));
-	        }]);
-	    });
-
-	    // Progress propagator need to be attached in the current tick.
-	    self.promiseDispatch(void 0, "when", [void 0, function (value) {
-	        var newValue;
-	        var threw = false;
-	        try {
-	            newValue = _progressed(value);
-	        } catch (e) {
-	            threw = true;
-	            if (Q.onerror) {
-	                Q.onerror(e);
-	            } else {
-	                throw e;
-	            }
-	        }
-
-	        if (!threw) {
-	            deferred.notify(newValue);
-	        }
-	    }]);
-
-	    return deferred.promise;
-	};
-
-	Q.tap = function (promise, callback) {
-	    return Q(promise).tap(callback);
-	};
-
-	/**
-	 * Works almost like "finally", but not called for rejections.
-	 * Original resolution value is passed through callback unaffected.
-	 * Callback may return a promise that will be awaited for.
-	 * @param {Function} callback
-	 * @returns {Q.Promise}
-	 * @example
-	 * doSomething()
-	 *   .then(...)
-	 *   .tap(console.log)
-	 *   .then(...);
-	 */
-	Promise.prototype.tap = function (callback) {
-	    callback = Q(callback);
-
-	    return this.then(function (value) {
-	        return callback.fcall(value).thenResolve(value);
-	    });
-	};
-
-	/**
-	 * Registers an observer on a promise.
-	 *
-	 * Guarantees:
-	 *
-	 * 1. that fulfilled and rejected will be called only once.
-	 * 2. that either the fulfilled callback or the rejected callback will be
-	 *    called, but not both.
-	 * 3. that fulfilled and rejected will not be called in this turn.
-	 *
-	 * @param value      promise or immediate reference to observe
-	 * @param fulfilled  function to be called with the fulfilled value
-	 * @param rejected   function to be called with the rejection exception
-	 * @param progressed function to be called on any progress notifications
-	 * @return promise for the return value from the invoked callback
-	 */
-	Q.when = when;
-	function when(value, fulfilled, rejected, progressed) {
-	    return Q(value).then(fulfilled, rejected, progressed);
-	}
-
-	Promise.prototype.thenResolve = function (value) {
-	    return this.then(function () { return value; });
-	};
-
-	Q.thenResolve = function (promise, value) {
-	    return Q(promise).thenResolve(value);
-	};
-
-	Promise.prototype.thenReject = function (reason) {
-	    return this.then(function () { throw reason; });
-	};
-
-	Q.thenReject = function (promise, reason) {
-	    return Q(promise).thenReject(reason);
-	};
-
-	/**
-	 * If an object is not a promise, it is as "near" as possible.
-	 * If a promise is rejected, it is as "near" as possible too.
-	 * If it’s a fulfilled promise, the fulfillment value is nearer.
-	 * If it’s a deferred promise and the deferred has been resolved, the
-	 * resolution is "nearer".
-	 * @param object
-	 * @returns most resolved (nearest) form of the object
-	 */
-
-	// XXX should we re-do this?
-	Q.nearer = nearer;
-	function nearer(value) {
-	    if (isPromise(value)) {
-	        var inspected = value.inspect();
-	        if (inspected.state === "fulfilled") {
-	            return inspected.value;
-	        }
-	    }
-	    return value;
-	}
-
-	/**
-	 * @returns whether the given object is a promise.
-	 * Otherwise it is a fulfilled value.
-	 */
-	Q.isPromise = isPromise;
-	function isPromise(object) {
-	    return object instanceof Promise;
-	}
-
-	Q.isPromiseAlike = isPromiseAlike;
-	function isPromiseAlike(object) {
-	    return isObject(object) && typeof object.then === "function";
-	}
-
-	/**
-	 * @returns whether the given object is a pending promise, meaning not
-	 * fulfilled or rejected.
-	 */
-	Q.isPending = isPending;
-	function isPending(object) {
-	    return isPromise(object) && object.inspect().state === "pending";
-	}
-
-	Promise.prototype.isPending = function () {
-	    return this.inspect().state === "pending";
-	};
-
-	/**
-	 * @returns whether the given object is a value or fulfilled
-	 * promise.
-	 */
-	Q.isFulfilled = isFulfilled;
-	function isFulfilled(object) {
-	    return !isPromise(object) || object.inspect().state === "fulfilled";
-	}
-
-	Promise.prototype.isFulfilled = function () {
-	    return this.inspect().state === "fulfilled";
-	};
-
-	/**
-	 * @returns whether the given object is a rejected promise.
-	 */
-	Q.isRejected = isRejected;
-	function isRejected(object) {
-	    return isPromise(object) && object.inspect().state === "rejected";
-	}
-
-	Promise.prototype.isRejected = function () {
-	    return this.inspect().state === "rejected";
-	};
-
-	//// BEGIN UNHANDLED REJECTION TRACKING
-
-	// This promise library consumes exceptions thrown in handlers so they can be
-	// handled by a subsequent promise.  The exceptions get added to this array when
-	// they are created, and removed when they are handled.  Note that in ES6 or
-	// shimmed environments, this would naturally be a `Set`.
-	var unhandledReasons = [];
-	var unhandledRejections = [];
-	var reportedUnhandledRejections = [];
-	var trackUnhandledRejections = true;
-
-	function resetUnhandledRejections() {
-	    unhandledReasons.length = 0;
-	    unhandledRejections.length = 0;
-
-	    if (!trackUnhandledRejections) {
-	        trackUnhandledRejections = true;
-	    }
-	}
-
-	function trackRejection(promise, reason) {
-	    if (!trackUnhandledRejections) {
-	        return;
-	    }
-	    if (typeof process === "object" && typeof process.emit === "function") {
-	        Q.nextTick.runAfter(function () {
-	            if (array_indexOf(unhandledRejections, promise) !== -1) {
-	                process.emit("unhandledRejection", reason, promise);
-	                reportedUnhandledRejections.push(promise);
-	            }
-	        });
-	    }
-
-	    unhandledRejections.push(promise);
-	    if (reason && typeof reason.stack !== "undefined") {
-	        unhandledReasons.push(reason.stack);
-	    } else {
-	        unhandledReasons.push("(no stack) " + reason);
-	    }
-	}
-
-	function untrackRejection(promise) {
-	    if (!trackUnhandledRejections) {
-	        return;
-	    }
-
-	    var at = array_indexOf(unhandledRejections, promise);
-	    if (at !== -1) {
-	        if (typeof process === "object" && typeof process.emit === "function") {
-	            Q.nextTick.runAfter(function () {
-	                var atReport = array_indexOf(reportedUnhandledRejections, promise);
-	                if (atReport !== -1) {
-	                    process.emit("rejectionHandled", unhandledReasons[at], promise);
-	                    reportedUnhandledRejections.splice(atReport, 1);
-	                }
-	            });
-	        }
-	        unhandledRejections.splice(at, 1);
-	        unhandledReasons.splice(at, 1);
-	    }
-	}
-
-	Q.resetUnhandledRejections = resetUnhandledRejections;
-
-	Q.getUnhandledReasons = function () {
-	    // Make a copy so that consumers can't interfere with our internal state.
-	    return unhandledReasons.slice();
-	};
-
-	Q.stopUnhandledRejectionTracking = function () {
-	    resetUnhandledRejections();
-	    trackUnhandledRejections = false;
-	};
-
-	resetUnhandledRejections();
-
-	//// END UNHANDLED REJECTION TRACKING
-
-	/**
-	 * Constructs a rejected promise.
-	 * @param reason value describing the failure
-	 */
-	Q.reject = reject;
-	function reject(reason) {
-	    var rejection = Promise({
-	        "when": function (rejected) {
-	            // note that the error has been handled
-	            if (rejected) {
-	                untrackRejection(this);
-	            }
-	            return rejected ? rejected(reason) : this;
-	        }
-	    }, function fallback() {
-	        return this;
-	    }, function inspect() {
-	        return { state: "rejected", reason: reason };
-	    });
-
-	    // Note that the reason has not been handled.
-	    trackRejection(rejection, reason);
-
-	    return rejection;
-	}
-
-	/**
-	 * Constructs a fulfilled promise for an immediate reference.
-	 * @param value immediate reference
-	 */
-	Q.fulfill = fulfill;
-	function fulfill(value) {
-	    return Promise({
-	        "when": function () {
-	            return value;
-	        },
-	        "get": function (name) {
-	            return value[name];
-	        },
-	        "set": function (name, rhs) {
-	            value[name] = rhs;
-	        },
-	        "delete": function (name) {
-	            delete value[name];
-	        },
-	        "post": function (name, args) {
-	            // Mark Miller proposes that post with no name should apply a
-	            // promised function.
-	            if (name === null || name === void 0) {
-	                return value.apply(void 0, args);
-	            } else {
-	                return value[name].apply(value, args);
-	            }
-	        },
-	        "apply": function (thisp, args) {
-	            return value.apply(thisp, args);
-	        },
-	        "keys": function () {
-	            return object_keys(value);
-	        }
-	    }, void 0, function inspect() {
-	        return { state: "fulfilled", value: value };
-	    });
-	}
-
-	/**
-	 * Converts thenables to Q promises.
-	 * @param promise thenable promise
-	 * @returns a Q promise
-	 */
-	function coerce(promise) {
-	    var deferred = defer();
-	    Q.nextTick(function () {
-	        try {
-	            promise.then(deferred.resolve, deferred.reject, deferred.notify);
-	        } catch (exception) {
-	            deferred.reject(exception);
-	        }
-	    });
-	    return deferred.promise;
-	}
-
-	/**
-	 * Annotates an object such that it will never be
-	 * transferred away from this process over any promise
-	 * communication channel.
-	 * @param object
-	 * @returns promise a wrapping of that object that
-	 * additionally responds to the "isDef" message
-	 * without a rejection.
-	 */
-	Q.master = master;
-	function master(object) {
-	    return Promise({
-	        "isDef": function () {}
-	    }, function fallback(op, args) {
-	        return dispatch(object, op, args);
-	    }, function () {
-	        return Q(object).inspect();
-	    });
-	}
-
-	/**
-	 * Spreads the values of a promised array of arguments into the
-	 * fulfillment callback.
-	 * @param fulfilled callback that receives variadic arguments from the
-	 * promised array
-	 * @param rejected callback that receives the exception if the promise
-	 * is rejected.
-	 * @returns a promise for the return value or thrown exception of
-	 * either callback.
-	 */
-	Q.spread = spread;
-	function spread(value, fulfilled, rejected) {
-	    return Q(value).spread(fulfilled, rejected);
-	}
-
-	Promise.prototype.spread = function (fulfilled, rejected) {
-	    return this.all().then(function (array) {
-	        return fulfilled.apply(void 0, array);
-	    }, rejected);
-	};
-
-	/**
-	 * The async function is a decorator for generator functions, turning
-	 * them into asynchronous generators.  Although generators are only part
-	 * of the newest ECMAScript 6 drafts, this code does not cause syntax
-	 * errors in older engines.  This code should continue to work and will
-	 * in fact improve over time as the language improves.
-	 *
-	 * ES6 generators are currently part of V8 version 3.19 with the
-	 * --harmony-generators runtime flag enabled.  SpiderMonkey has had them
-	 * for longer, but under an older Python-inspired form.  This function
-	 * works on both kinds of generators.
-	 *
-	 * Decorates a generator function such that:
-	 *  - it may yield promises
-	 *  - execution will continue when that promise is fulfilled
-	 *  - the value of the yield expression will be the fulfilled value
-	 *  - it returns a promise for the return value (when the generator
-	 *    stops iterating)
-	 *  - the decorated function returns a promise for the return value
-	 *    of the generator or the first rejected promise among those
-	 *    yielded.
-	 *  - if an error is thrown in the generator, it propagates through
-	 *    every following yield until it is caught, or until it escapes
-	 *    the generator function altogether, and is translated into a
-	 *    rejection for the promise returned by the decorated generator.
-	 */
-	Q.async = async;
-	function async(makeGenerator) {
-	    return function () {
-	        // when verb is "send", arg is a value
-	        // when verb is "throw", arg is an exception
-	        function continuer(verb, arg) {
-	            var result;
-
-	            // Until V8 3.19 / Chromium 29 is released, SpiderMonkey is the only
-	            // engine that has a deployed base of browsers that support generators.
-	            // However, SM's generators use the Python-inspired semantics of
-	            // outdated ES6 drafts.  We would like to support ES6, but we'd also
-	            // like to make it possible to use generators in deployed browsers, so
-	            // we also support Python-style generators.  At some point we can remove
-	            // this block.
-
-	            if (typeof StopIteration === "undefined") {
-	                // ES6 Generators
-	                try {
-	                    result = generator[verb](arg);
-	                } catch (exception) {
-	                    return reject(exception);
-	                }
-	                if (result.done) {
-	                    return Q(result.value);
-	                } else {
-	                    return when(result.value, callback, errback);
-	                }
-	            } else {
-	                // SpiderMonkey Generators
-	                // FIXME: Remove this case when SM does ES6 generators.
-	                try {
-	                    result = generator[verb](arg);
-	                } catch (exception) {
-	                    if (isStopIteration(exception)) {
-	                        return Q(exception.value);
-	                    } else {
-	                        return reject(exception);
-	                    }
-	                }
-	                return when(result, callback, errback);
-	            }
-	        }
-	        var generator = makeGenerator.apply(this, arguments);
-	        var callback = continuer.bind(continuer, "next");
-	        var errback = continuer.bind(continuer, "throw");
-	        return callback();
-	    };
-	}
-
-	/**
-	 * The spawn function is a small wrapper around async that immediately
-	 * calls the generator and also ends the promise chain, so that any
-	 * unhandled errors are thrown instead of forwarded to the error
-	 * handler. This is useful because it's extremely common to run
-	 * generators at the top-level to work with libraries.
-	 */
-	Q.spawn = spawn;
-	function spawn(makeGenerator) {
-	    Q.done(Q.async(makeGenerator)());
-	}
-
-	// FIXME: Remove this interface once ES6 generators are in SpiderMonkey.
-	/**
-	 * Throws a ReturnValue exception to stop an asynchronous generator.
-	 *
-	 * This interface is a stop-gap measure to support generator return
-	 * values in older Firefox/SpiderMonkey.  In browsers that support ES6
-	 * generators like Chromium 29, just use "return" in your generator
-	 * functions.
-	 *
-	 * @param value the return value for the surrounding generator
-	 * @throws ReturnValue exception with the value.
-	 * @example
-	 * // ES6 style
-	 * Q.async(function* () {
-	 *      var foo = yield getFooPromise();
-	 *      var bar = yield getBarPromise();
-	 *      return foo + bar;
-	 * })
-	 * // Older SpiderMonkey style
-	 * Q.async(function () {
-	 *      var foo = yield getFooPromise();
-	 *      var bar = yield getBarPromise();
-	 *      Q.return(foo + bar);
-	 * })
-	 */
-	Q["return"] = _return;
-	function _return(value) {
-	    throw new QReturnValue(value);
-	}
-
-	/**
-	 * The promised function decorator ensures that any promise arguments
-	 * are settled and passed as values (`this` is also settled and passed
-	 * as a value).  It will also ensure that the result of a function is
-	 * always a promise.
-	 *
-	 * @example
-	 * var add = Q.promised(function (a, b) {
-	 *     return a + b;
-	 * });
-	 * add(Q(a), Q(B));
-	 *
-	 * @param {function} callback The function to decorate
-	 * @returns {function} a function that has been decorated.
-	 */
-	Q.promised = promised;
-	function promised(callback) {
-	    return function () {
-	        return spread([this, all(arguments)], function (self, args) {
-	            return callback.apply(self, args);
-	        });
-	    };
-	}
-
-	/**
-	 * sends a message to a value in a future turn
-	 * @param object* the recipient
-	 * @param op the name of the message operation, e.g., "when",
-	 * @param args further arguments to be forwarded to the operation
-	 * @returns result {Promise} a promise for the result of the operation
-	 */
-	Q.dispatch = dispatch;
-	function dispatch(object, op, args) {
-	    return Q(object).dispatch(op, args);
-	}
-
-	Promise.prototype.dispatch = function (op, args) {
-	    var self = this;
-	    var deferred = defer();
-	    Q.nextTick(function () {
-	        self.promiseDispatch(deferred.resolve, op, args);
-	    });
-	    return deferred.promise;
-	};
-
-	/**
-	 * Gets the value of a property in a future turn.
-	 * @param object    promise or immediate reference for target object
-	 * @param name      name of property to get
-	 * @return promise for the property value
-	 */
-	Q.get = function (object, key) {
-	    return Q(object).dispatch("get", [key]);
-	};
-
-	Promise.prototype.get = function (key) {
-	    return this.dispatch("get", [key]);
-	};
-
-	/**
-	 * Sets the value of a property in a future turn.
-	 * @param object    promise or immediate reference for object object
-	 * @param name      name of property to set
-	 * @param value     new value of property
-	 * @return promise for the return value
-	 */
-	Q.set = function (object, key, value) {
-	    return Q(object).dispatch("set", [key, value]);
-	};
-
-	Promise.prototype.set = function (key, value) {
-	    return this.dispatch("set", [key, value]);
-	};
-
-	/**
-	 * Deletes a property in a future turn.
-	 * @param object    promise or immediate reference for target object
-	 * @param name      name of property to delete
-	 * @return promise for the return value
-	 */
-	Q.del = // XXX legacy
-	Q["delete"] = function (object, key) {
-	    return Q(object).dispatch("delete", [key]);
-	};
-
-	Promise.prototype.del = // XXX legacy
-	Promise.prototype["delete"] = function (key) {
-	    return this.dispatch("delete", [key]);
-	};
-
-	/**
-	 * Invokes a method in a future turn.
-	 * @param object    promise or immediate reference for target object
-	 * @param name      name of method to invoke
-	 * @param value     a value to post, typically an array of
-	 *                  invocation arguments for promises that
-	 *                  are ultimately backed with `resolve` values,
-	 *                  as opposed to those backed with URLs
-	 *                  wherein the posted value can be any
-	 *                  JSON serializable object.
-	 * @return promise for the return value
-	 */
-	// bound locally because it is used by other methods
-	Q.mapply = // XXX As proposed by "Redsandro"
-	Q.post = function (object, name, args) {
-	    return Q(object).dispatch("post", [name, args]);
-	};
-
-	Promise.prototype.mapply = // XXX As proposed by "Redsandro"
-	Promise.prototype.post = function (name, args) {
-	    return this.dispatch("post", [name, args]);
-	};
-
-	/**
-	 * Invokes a method in a future turn.
-	 * @param object    promise or immediate reference for target object
-	 * @param name      name of method to invoke
-	 * @param ...args   array of invocation arguments
-	 * @return promise for the return value
-	 */
-	Q.send = // XXX Mark Miller's proposed parlance
-	Q.mcall = // XXX As proposed by "Redsandro"
-	Q.invoke = function (object, name /*...args*/) {
-	    return Q(object).dispatch("post", [name, array_slice(arguments, 2)]);
-	};
-
-	Promise.prototype.send = // XXX Mark Miller's proposed parlance
-	Promise.prototype.mcall = // XXX As proposed by "Redsandro"
-	Promise.prototype.invoke = function (name /*...args*/) {
-	    return this.dispatch("post", [name, array_slice(arguments, 1)]);
-	};
-
-	/**
-	 * Applies the promised function in a future turn.
-	 * @param object    promise or immediate reference for target function
-	 * @param args      array of application arguments
-	 */
-	Q.fapply = function (object, args) {
-	    return Q(object).dispatch("apply", [void 0, args]);
-	};
-
-	Promise.prototype.fapply = function (args) {
-	    return this.dispatch("apply", [void 0, args]);
-	};
-
-	/**
-	 * Calls the promised function in a future turn.
-	 * @param object    promise or immediate reference for target function
-	 * @param ...args   array of application arguments
-	 */
-	Q["try"] =
-	Q.fcall = function (object /* ...args*/) {
-	    return Q(object).dispatch("apply", [void 0, array_slice(arguments, 1)]);
-	};
-
-	Promise.prototype.fcall = function (/*...args*/) {
-	    return this.dispatch("apply", [void 0, array_slice(arguments)]);
-	};
-
-	/**
-	 * Binds the promised function, transforming return values into a fulfilled
-	 * promise and thrown errors into a rejected one.
-	 * @param object    promise or immediate reference for target function
-	 * @param ...args   array of application arguments
-	 */
-	Q.fbind = function (object /*...args*/) {
-	    var promise = Q(object);
-	    var args = array_slice(arguments, 1);
-	    return function fbound() {
-	        return promise.dispatch("apply", [
-	            this,
-	            args.concat(array_slice(arguments))
-	        ]);
-	    };
-	};
-	Promise.prototype.fbind = function (/*...args*/) {
-	    var promise = this;
-	    var args = array_slice(arguments);
-	    return function fbound() {
-	        return promise.dispatch("apply", [
-	            this,
-	            args.concat(array_slice(arguments))
-	        ]);
-	    };
-	};
-
-	/**
-	 * Requests the names of the owned properties of a promised
-	 * object in a future turn.
-	 * @param object    promise or immediate reference for target object
-	 * @return promise for the keys of the eventually settled object
-	 */
-	Q.keys = function (object) {
-	    return Q(object).dispatch("keys", []);
-	};
-
-	Promise.prototype.keys = function () {
-	    return this.dispatch("keys", []);
-	};
-
-	/**
-	 * Turns an array of promises into a promise for an array.  If any of
-	 * the promises gets rejected, the whole array is rejected immediately.
-	 * @param {Array*} an array (or promise for an array) of values (or
-	 * promises for values)
-	 * @returns a promise for an array of the corresponding values
-	 */
-	// By Mark Miller
-	// http://wiki.ecmascript.org/doku.php?id=strawman:concurrency&rev=1308776521#allfulfilled
-	Q.all = all;
-	function all(promises) {
-	    return when(promises, function (promises) {
-	        var pendingCount = 0;
-	        var deferred = defer();
-	        array_reduce(promises, function (undefined, promise, index) {
-	            var snapshot;
-	            if (
-	                isPromise(promise) &&
-	                (snapshot = promise.inspect()).state === "fulfilled"
-	            ) {
-	                promises[index] = snapshot.value;
-	            } else {
-	                ++pendingCount;
-	                when(
-	                    promise,
-	                    function (value) {
-	                        promises[index] = value;
-	                        if (--pendingCount === 0) {
-	                            deferred.resolve(promises);
-	                        }
-	                    },
-	                    deferred.reject,
-	                    function (progress) {
-	                        deferred.notify({ index: index, value: progress });
-	                    }
-	                );
-	            }
-	        }, void 0);
-	        if (pendingCount === 0) {
-	            deferred.resolve(promises);
-	        }
-	        return deferred.promise;
-	    });
-	}
-
-	Promise.prototype.all = function () {
-	    return all(this);
-	};
-
-	/**
-	 * Returns the first resolved promise of an array. Prior rejected promises are
-	 * ignored.  Rejects only if all promises are rejected.
-	 * @param {Array*} an array containing values or promises for values
-	 * @returns a promise fulfilled with the value of the first resolved promise,
-	 * or a rejected promise if all promises are rejected.
-	 */
-	Q.any = any;
-
-	function any(promises) {
-	    if (promises.length === 0) {
-	        return Q.resolve();
-	    }
-
-	    var deferred = Q.defer();
-	    var pendingCount = 0;
-	    array_reduce(promises, function (prev, current, index) {
-	        var promise = promises[index];
-
-	        pendingCount++;
-
-	        when(promise, onFulfilled, onRejected, onProgress);
-	        function onFulfilled(result) {
-	            deferred.resolve(result);
-	        }
-	        function onRejected() {
-	            pendingCount--;
-	            if (pendingCount === 0) {
-	                deferred.reject(new Error(
-	                    "Can't get fulfillment value from any promise, all " +
-	                    "promises were rejected."
-	                ));
-	            }
-	        }
-	        function onProgress(progress) {
-	            deferred.notify({
-	                index: index,
-	                value: progress
-	            });
-	        }
-	    }, undefined);
-
-	    return deferred.promise;
-	}
-
-	Promise.prototype.any = function () {
-	    return any(this);
-	};
-
-	/**
-	 * Waits for all promises to be settled, either fulfilled or
-	 * rejected.  This is distinct from `all` since that would stop
-	 * waiting at the first rejection.  The promise returned by
-	 * `allResolved` will never be rejected.
-	 * @param promises a promise for an array (or an array) of promises
-	 * (or values)
-	 * @return a promise for an array of promises
-	 */
-	Q.allResolved = deprecate(allResolved, "allResolved", "allSettled");
-	function allResolved(promises) {
-	    return when(promises, function (promises) {
-	        promises = array_map(promises, Q);
-	        return when(all(array_map(promises, function (promise) {
-	            return when(promise, noop, noop);
-	        })), function () {
-	            return promises;
-	        });
-	    });
-	}
-
-	Promise.prototype.allResolved = function () {
-	    return allResolved(this);
-	};
-
-	/**
-	 * @see Promise#allSettled
-	 */
-	Q.allSettled = allSettled;
-	function allSettled(promises) {
-	    return Q(promises).allSettled();
-	}
-
-	/**
-	 * Turns an array of promises into a promise for an array of their states (as
-	 * returned by `inspect`) when they have all settled.
-	 * @param {Array[Any*]} values an array (or promise for an array) of values (or
-	 * promises for values)
-	 * @returns {Array[State]} an array of states for the respective values.
-	 */
-	Promise.prototype.allSettled = function () {
-	    return this.then(function (promises) {
-	        return all(array_map(promises, function (promise) {
-	            promise = Q(promise);
-	            function regardless() {
-	                return promise.inspect();
-	            }
-	            return promise.then(regardless, regardless);
-	        }));
-	    });
-	};
-
-	/**
-	 * Captures the failure of a promise, giving an oportunity to recover
-	 * with a callback.  If the given promise is fulfilled, the returned
-	 * promise is fulfilled.
-	 * @param {Any*} promise for something
-	 * @param {Function} callback to fulfill the returned promise if the
-	 * given promise is rejected
-	 * @returns a promise for the return value of the callback
-	 */
-	Q.fail = // XXX legacy
-	Q["catch"] = function (object, rejected) {
-	    return Q(object).then(void 0, rejected);
-	};
-
-	Promise.prototype.fail = // XXX legacy
-	Promise.prototype["catch"] = function (rejected) {
-	    return this.then(void 0, rejected);
-	};
-
-	/**
-	 * Attaches a listener that can respond to progress notifications from a
-	 * promise's originating deferred. This listener receives the exact arguments
-	 * passed to ``deferred.notify``.
-	 * @param {Any*} promise for something
-	 * @param {Function} callback to receive any progress notifications
-	 * @returns the given promise, unchanged
-	 */
-	Q.progress = progress;
-	function progress(object, progressed) {
-	    return Q(object).then(void 0, void 0, progressed);
-	}
-
-	Promise.prototype.progress = function (progressed) {
-	    return this.then(void 0, void 0, progressed);
-	};
-
-	/**
-	 * Provides an opportunity to observe the settling of a promise,
-	 * regardless of whether the promise is fulfilled or rejected.  Forwards
-	 * the resolution to the returned promise when the callback is done.
-	 * The callback can return a promise to defer completion.
-	 * @param {Any*} promise
-	 * @param {Function} callback to observe the resolution of the given
-	 * promise, takes no arguments.
-	 * @returns a promise for the resolution of the given promise when
-	 * ``fin`` is done.
-	 */
-	Q.fin = // XXX legacy
-	Q["finally"] = function (object, callback) {
-	    return Q(object)["finally"](callback);
-	};
-
-	Promise.prototype.fin = // XXX legacy
-	Promise.prototype["finally"] = function (callback) {
-	    callback = Q(callback);
-	    return this.then(function (value) {
-	        return callback.fcall().then(function () {
-	            return value;
-	        });
-	    }, function (reason) {
-	        // TODO attempt to recycle the rejection with "this".
-	        return callback.fcall().then(function () {
-	            throw reason;
-	        });
-	    });
-	};
-
-	/**
-	 * Terminates a chain of promises, forcing rejections to be
-	 * thrown as exceptions.
-	 * @param {Any*} promise at the end of a chain of promises
-	 * @returns nothing
-	 */
-	Q.done = function (object, fulfilled, rejected, progress) {
-	    return Q(object).done(fulfilled, rejected, progress);
-	};
-
-	Promise.prototype.done = function (fulfilled, rejected, progress) {
-	    var onUnhandledError = function (error) {
-	        // forward to a future turn so that ``when``
-	        // does not catch it and turn it into a rejection.
-	        Q.nextTick(function () {
-	            makeStackTraceLong(error, promise);
-	            if (Q.onerror) {
-	                Q.onerror(error);
-	            } else {
-	                throw error;
-	            }
-	        });
-	    };
-
-	    // Avoid unnecessary `nextTick`ing via an unnecessary `when`.
-	    var promise = fulfilled || rejected || progress ?
-	        this.then(fulfilled, rejected, progress) :
-	        this;
-
-	    if (typeof process === "object" && process && process.domain) {
-	        onUnhandledError = process.domain.bind(onUnhandledError);
-	    }
-
-	    promise.then(void 0, onUnhandledError);
-	};
-
-	/**
-	 * Causes a promise to be rejected if it does not get fulfilled before
-	 * some milliseconds time out.
-	 * @param {Any*} promise
-	 * @param {Number} milliseconds timeout
-	 * @param {Any*} custom error message or Error object (optional)
-	 * @returns a promise for the resolution of the given promise if it is
-	 * fulfilled before the timeout, otherwise rejected.
-	 */
-	Q.timeout = function (object, ms, error) {
-	    return Q(object).timeout(ms, error);
-	};
-
-	Promise.prototype.timeout = function (ms, error) {
-	    var deferred = defer();
-	    var timeoutId = setTimeout(function () {
-	        if (!error || "string" === typeof error) {
-	            error = new Error(error || "Timed out after " + ms + " ms");
-	            error.code = "ETIMEDOUT";
-	        }
-	        deferred.reject(error);
-	    }, ms);
-
-	    this.then(function (value) {
-	        clearTimeout(timeoutId);
-	        deferred.resolve(value);
-	    }, function (exception) {
-	        clearTimeout(timeoutId);
-	        deferred.reject(exception);
-	    }, deferred.notify);
-
-	    return deferred.promise;
-	};
-
-	/**
-	 * Returns a promise for the given value (or promised value), some
-	 * milliseconds after it resolved. Passes rejections immediately.
-	 * @param {Any*} promise
-	 * @param {Number} milliseconds
-	 * @returns a promise for the resolution of the given promise after milliseconds
-	 * time has elapsed since the resolution of the given promise.
-	 * If the given promise rejects, that is passed immediately.
-	 */
-	Q.delay = function (object, timeout) {
-	    if (timeout === void 0) {
-	        timeout = object;
-	        object = void 0;
-	    }
-	    return Q(object).delay(timeout);
-	};
-
-	Promise.prototype.delay = function (timeout) {
-	    return this.then(function (value) {
-	        var deferred = defer();
-	        setTimeout(function () {
-	            deferred.resolve(value);
-	        }, timeout);
-	        return deferred.promise;
-	    });
-	};
-
-	/**
-	 * Passes a continuation to a Node function, which is called with the given
-	 * arguments provided as an array, and returns a promise.
-	 *
-	 *      Q.nfapply(FS.readFile, [__filename])
-	 *      .then(function (content) {
-	 *      })
-	 *
-	 */
-	Q.nfapply = function (callback, args) {
-	    return Q(callback).nfapply(args);
-	};
-
-	Promise.prototype.nfapply = function (args) {
-	    var deferred = defer();
-	    var nodeArgs = array_slice(args);
-	    nodeArgs.push(deferred.makeNodeResolver());
-	    this.fapply(nodeArgs).fail(deferred.reject);
-	    return deferred.promise;
-	};
-
-	/**
-	 * Passes a continuation to a Node function, which is called with the given
-	 * arguments provided individually, and returns a promise.
-	 * @example
-	 * Q.nfcall(FS.readFile, __filename)
-	 * .then(function (content) {
-	 * })
-	 *
-	 */
-	Q.nfcall = function (callback /*...args*/) {
-	    var args = array_slice(arguments, 1);
-	    return Q(callback).nfapply(args);
-	};
-
-	Promise.prototype.nfcall = function (/*...args*/) {
-	    var nodeArgs = array_slice(arguments);
-	    var deferred = defer();
-	    nodeArgs.push(deferred.makeNodeResolver());
-	    this.fapply(nodeArgs).fail(deferred.reject);
-	    return deferred.promise;
-	};
-
-	/**
-	 * Wraps a NodeJS continuation passing function and returns an equivalent
-	 * version that returns a promise.
-	 * @example
-	 * Q.nfbind(FS.readFile, __filename)("utf-8")
-	 * .then(console.log)
-	 * .done()
-	 */
-	Q.nfbind =
-	Q.denodeify = function (callback /*...args*/) {
-	    var baseArgs = array_slice(arguments, 1);
-	    return function () {
-	        var nodeArgs = baseArgs.concat(array_slice(arguments));
-	        var deferred = defer();
-	        nodeArgs.push(deferred.makeNodeResolver());
-	        Q(callback).fapply(nodeArgs).fail(deferred.reject);
-	        return deferred.promise;
-	    };
-	};
-
-	Promise.prototype.nfbind =
-	Promise.prototype.denodeify = function (/*...args*/) {
-	    var args = array_slice(arguments);
-	    args.unshift(this);
-	    return Q.denodeify.apply(void 0, args);
-	};
-
-	Q.nbind = function (callback, thisp /*...args*/) {
-	    var baseArgs = array_slice(arguments, 2);
-	    return function () {
-	        var nodeArgs = baseArgs.concat(array_slice(arguments));
-	        var deferred = defer();
-	        nodeArgs.push(deferred.makeNodeResolver());
-	        function bound() {
-	            return callback.apply(thisp, arguments);
-	        }
-	        Q(bound).fapply(nodeArgs).fail(deferred.reject);
-	        return deferred.promise;
-	    };
-	};
-
-	Promise.prototype.nbind = function (/*thisp, ...args*/) {
-	    var args = array_slice(arguments, 0);
-	    args.unshift(this);
-	    return Q.nbind.apply(void 0, args);
-	};
-
-	/**
-	 * Calls a method of a Node-style object that accepts a Node-style
-	 * callback with a given array of arguments, plus a provided callback.
-	 * @param object an object that has the named method
-	 * @param {String} name name of the method of object
-	 * @param {Array} args arguments to pass to the method; the callback
-	 * will be provided by Q and appended to these arguments.
-	 * @returns a promise for the value or error
-	 */
-	Q.nmapply = // XXX As proposed by "Redsandro"
-	Q.npost = function (object, name, args) {
-	    return Q(object).npost(name, args);
-	};
-
-	Promise.prototype.nmapply = // XXX As proposed by "Redsandro"
-	Promise.prototype.npost = function (name, args) {
-	    var nodeArgs = array_slice(args || []);
-	    var deferred = defer();
-	    nodeArgs.push(deferred.makeNodeResolver());
-	    this.dispatch("post", [name, nodeArgs]).fail(deferred.reject);
-	    return deferred.promise;
-	};
-
-	/**
-	 * Calls a method of a Node-style object that accepts a Node-style
-	 * callback, forwarding the given variadic arguments, plus a provided
-	 * callback argument.
-	 * @param object an object that has the named method
-	 * @param {String} name name of the method of object
-	 * @param ...args arguments to pass to the method; the callback will
-	 * be provided by Q and appended to these arguments.
-	 * @returns a promise for the value or error
-	 */
-	Q.nsend = // XXX Based on Mark Miller's proposed "send"
-	Q.nmcall = // XXX Based on "Redsandro's" proposal
-	Q.ninvoke = function (object, name /*...args*/) {
-	    var nodeArgs = array_slice(arguments, 2);
-	    var deferred = defer();
-	    nodeArgs.push(deferred.makeNodeResolver());
-	    Q(object).dispatch("post", [name, nodeArgs]).fail(deferred.reject);
-	    return deferred.promise;
-	};
-
-	Promise.prototype.nsend = // XXX Based on Mark Miller's proposed "send"
-	Promise.prototype.nmcall = // XXX Based on "Redsandro's" proposal
-	Promise.prototype.ninvoke = function (name /*...args*/) {
-	    var nodeArgs = array_slice(arguments, 1);
-	    var deferred = defer();
-	    nodeArgs.push(deferred.makeNodeResolver());
-	    this.dispatch("post", [name, nodeArgs]).fail(deferred.reject);
-	    return deferred.promise;
-	};
-
-	/**
-	 * If a function would like to support both Node continuation-passing-style and
-	 * promise-returning-style, it can end its internal promise chain with
-	 * `nodeify(nodeback)`, forwarding the optional nodeback argument.  If the user
-	 * elects to use a nodeback, the result will be sent there.  If they do not
-	 * pass a nodeback, they will receive the result promise.
-	 * @param object a result (or a promise for a result)
-	 * @param {Function} nodeback a Node.js-style callback
-	 * @returns either the promise or nothing
-	 */
-	Q.nodeify = nodeify;
-	function nodeify(object, nodeback) {
-	    return Q(object).nodeify(nodeback);
-	}
-
-	Promise.prototype.nodeify = function (nodeback) {
-	    if (nodeback) {
-	        this.then(function (value) {
-	            Q.nextTick(function () {
-	                nodeback(null, value);
-	            });
-	        }, function (error) {
-	            Q.nextTick(function () {
-	                nodeback(error);
-	            });
-	        });
-	    } else {
-	        return this;
-	    }
-	};
-
-	// All code before this point will be filtered from stack traces.
-	var qEndingLine = captureLine();
-
-	return Q;
-
-	});
-
-
-/***/ },
-/* 7 */
-/***/ function(module, exports, __webpack_require__) {
-
-	/*
-	 * Copyright 2015, Digium, Inc.
-	 * All rights reserved.
-	 *
-	 * This source code is licensed under The MIT License found in the
-	 * LICENSE file in the root directory of this source tree.
-	 *
-	 * For all details and documentation:  https://www.respoke.io
-	 */
-
-	var Q = __webpack_require__(6);
-	var respoke = __webpack_require__(1);
-	var log = respoke.log;
-
-	/**
-	 * `respoke.Client` is the top-level interface to the API. Interacting with Respoke should be done using
-	 * a `respoke.Client` instance.
-	 *
-	 * There are two ways to get a client:
-	 *
-	 *      var client = respoke.createClient(clientParams);
-	 *      // . . . set stuff up, then . . .
-	 *      client.connect(connectParams);
-	 *
-	 * or
-	 *
-	 *      // creates client and connects to Respoke all at once
-	 *      var client = respoke.connect(allParams);
-	 *
-	 * A client does the following things:
-	 *
-	 * 1. authentication with the Respoke API
-	 * 1. receives server-side app-specific information
-	 * 1. tracks connections and presence
-	 * 1. provides methods to get and interact with tracked entities (like groups and endpoints)
-	 * 1. stores default settings for calls and direct connections
-	 * 1. automatically reconnects to the API when network activity is lost*
-	 *
-	 * *If `developmentMode` is set to true. If not using `developmentMode`, disable automatic
-	 * reconnect by sending `reconnect: false` and listening to the Client's disconnect event
-	 * to fetch a new brokered auth token, then call `client.connect()` with the new token.
-	 *
-	 * @class respoke.Client
-	 * @constructor
-	 * @augments respoke.EventEmitter
-	 * @param {object} params
-	 * @param {string} [params.appId] - The ID of your Respoke app. This must be passed either to
-	 * respoke.connect, respoke.createClient, or to client.connect.
-	 * @param {string} [params.token] - The endpoint's authentication token.
-	 * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
-	 * endpoint. This is only used when `developmentMode` is set to `true`.
-	 * @param {boolean} [params.developmentMode=false] - Indication to obtain an authentication token from the service.
-	 * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
-	 * operation and will limit the services you will be able to use.
-	 * @param {string|number|object|Array} [params.presence=unavailable] The initial presence to set once connected.
-	 * @param {boolean} [params.reconnect=true] - Whether or not to automatically reconnect to the Respoke service
-	 * when a disconnect occurs.
-	 * @proprety {number} [connectTimeoutMillis=10000] - Number of milliseconds before considering the connect operation timed out.
-	 * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
-	 * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves a group.
-	 * @param {respoke.Client.onClientMessage} [params.onMessage] - Callback for when any message is received
-	 * from anywhere on the system.
-	 * @param {respoke.Client.onConnect} [params.onConnect] - Callback for Client connect.
-	 * @param {respoke.Client.onDisconnect} [params.onDisconnect] - Callback for Client disconnect.
-	 * @param {respoke.Client.onReconnect} [params.onReconnect] - Callback for Client reconnect.
-	 * @param {respoke.Client.onCall} [params.onCall] - Callback for when this client's user receives a call.
-	 * @param {respoke.Client.onDirectConnection} [params.onDirectConnection] - Callback for when this client's user
-	 * receives a request for a direct connection.
-	 * @returns {respoke.Client}
-	 */
-	module.exports = function (params) {
-	    "use strict";
-	    params = params || {};
-	    /**
-	     * @memberof! respoke.Client
-	     * @name instanceId
-	     * @private
-	     * @type {string}
-	     */
-	    var instanceId = params.instanceId || respoke.makeGUID();
-	    params.instanceId = instanceId;
-	    var that = respoke.EventEmitter(params);
-	    respoke.instances[instanceId] = that;
-	    delete that.instanceId;
-	    that.connectTries = 0;
-	    /**
-	     * A name to identify this class
-	     * @memberof! respoke.Client
-	     * @name className
-	     * @type {string}
-	     */
-	    that.className = 'respoke.Client';
-	    /**
-	     * @memberof! respoke.Client
-	     * @name host
-	     * @type {string}
-	     * @private
-	     */
-	    var host = window.location.hostname;
-	    /**
-	     * @memberof! respoke.Client
-	     * @name port
-	     * @type {number}
-	     * @private
-	     */
-	    var port = window.location.port;
-
-	    /**
-	     * A container for baseURL, token, and appId so they won't be accidentally viewable in any JavaScript debugger.
-	     * @memberof! respoke.Client
-	     * @name clientSettings
-	     * @type {object}
-	     * @private
-	     * @property {string} [baseURL] - the URL of the cloud infrastructure's REST API.
-	     * @property {string} [token] - The endpoint's authentication token.
-	     * @property {string} [appId] - The id of your Respoke app.
-	     * @property {string} [endpointId] - An identifier to use when creating an authentication token for this
-	     * endpoint. This is only used when `developmentMode` is set to `true`.
-	     * @property {boolean} [developmentMode=false] - Indication to obtain an authentication token from the service.
-	     * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
-	     * operation and will limit the services you will be able to use.
-	     * @property {boolean} [reconnect=false] - Whether or not to automatically reconnect to the Respoke service
-	     * when a disconnect occurs.
-	     * @proprety {number} [connectTimeoutMillis=10000] - Number of milliseconds before considering the connect
-	     * timed out.
-	     * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
-	     * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves a group.
-	     * @property {respoke.Client.onClientMessage} [onMessage] - Callback for when any message is received
-	     * from anywhere on the system.
-	     * @property {respoke.Client.onConnect} [onConnect] - Callback for Client connect.
-	     * @property {respoke.Client.onDisconnect} [onDisconnect] - Callback for Client disconnect.
-	     * @property {respoke.Client.onReconnect} [onReconnect] - Callback for Client reconnect. Not Implemented.
-	     * @property {respoke.Client.onCall} [onCall] - Callback for when this client receives a call.
-	     * @property {respoke.Client.onDirectConnection} [onDirectConnection] - Callback for when this client
-	     * receives a request for a direct connection.
-	     * @property {boolean} enableCallDebugReport=true - Upon finishing a call, should the client send debugging
-	     * information to the API? Defaults to `true`.
-	     */
-	    var clientSettings = {};
-
-	    delete that.appId;
-	    delete that.baseURL;
-	    delete that.developmentMode;
-	    delete that.token;
-	    delete that.resolveEndpointPresence;
-
-	    /**
-	     * Internal list of known groups.
-	     * @memberof! respoke.Client
-	     * @name groups
-	     * @type {Array<respoke.Group>}
-	     * @private
-	     */
-	    var groups = [];
-	    /**
-	     * Internal list of known endpoints.
-	     * @memberof! respoke.Client
-	     * @name endpoints
-	     * @type {Array<respoke.Endpoint>}
-	     * @private
-	     */
-	    var endpoints = [];
-	    /**
-	     * Array of calls in progress, made accessible for informational purposes only.
-	     * **Never modify this array directly.**
-	     *
-	     * @memberof! respoke.Client
-	     * @name calls
-	     * @type {array}
-	     */
-	    that.calls = [];
-	    log.debug("Client ID is ", instanceId);
-
-	    /**
-	     * @memberof! respoke.Client
-	     * @name signalingChannel
-	     * @type {respoke.SignalingChannel}
-	     * @private
-	     */
-	    var signalingChannel = respoke.SignalingChannel({
-	        instanceId: instanceId,
-	        clientSettings: clientSettings
-	    });
-
-	    /**
-	     * Represents the presence status. Typically a string, but other types are supported.
-	     * Defaults to `'unavailable'`.
-	     *
-	     * **Do not modify this directly** - it won't update presence with Respoke. Use `setPresence()`.
-	     *
-	     * @memberof! respoke.Client
-	     * @name presence
-	     * @type {string|number|object|Array}
-	     */
-	    that.presence = params.presence || 'unavailable';
-
-	    /**
-	     * Deprecated: use endpoint.presence instead.
-	     *
-	     * Return the presence.
-	     * @memberof! respoke.Client
-	     * @deprecated
-	     * @name presence
-	     * @type {string|number|object|Array}
-	     */
-	    that.getPresence = function () {
-	        return that.presence;
-	    };
-
-	    /**
-	     * Save parameters of the constructor or client.connect() onto the clientSettings object
-	     * @memberof! respoke.Client
-	     * @method respoke.saveParameters
-	     * @param {object} params
-	     * @param {respoke.Client.connectSuccessHandler} [params.onSuccess] - Success handler for this invocation
-	     * of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @param {string} [params.appId] - The ID of your Respoke app. This must be passed either to
-	     * respoke.connect, respoke.createClient, or to client.connect.
-	     * @param {string} [params.token] - The endpoint's authentication token.
-	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
-	     * endpoint. This is only used when `developmentMode` is set to `true`.
-	     * @param {string|number|object|Array} [params.presence] The initial presence to set once connected.
-	     * @param {respoke.client.resolveEndpointPresence} [params.resolveEndpointPresence] An optional function for
-	     * resolving presence for an endpoint.  An endpoint can have multiple Connections this function will be used
-	     * to decide which Connection's presence gets precedence for the Endpoint.
-	     * @param {boolean} [params.developmentMode=false] - Indication to obtain an authentication token from the service.
-	     * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
-	     * operation and will limit the services you will be able to use.
-	     * @param {boolean} [params.reconnect=true] - Whether or not to automatically reconnect to the Respoke service
-	     * when a disconnect occurs.
-	     * @proprety {number} [paramsconnectTimeoutMillis=10000] - Number of milliseconds before considering the connect
-	     * timed out.
-	     * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
-	     * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves
-	     * a group.
-	     * @param {respoke.Client.onClientMessage} [params.onMessage] - Callback for when any message is
-	     * received from anywhere on the system.
-	     * @param {respoke.Client.onConnect} [params.onConnect] - Callback for Client connect.
-	     * @param {respoke.Client.onDisconnect} [params.onDisconnect] - Callback for Client disconnect.
-	     * @param {respoke.Client.onReconnect} [params.onReconnect] - Callback for Client reconnect. Not Implemented.
-	     * @param {respoke.Client.onCall} [params.onCall] - Callback for when this client receives a call.
-	     * @param {respoke.Client.onDirectConnection} [params.onDirectConnection] - Callback for when this
-	     * client receives a request for a direct connection.
-	     * @private
-	     */
-	    function saveParameters(params) {
-	        Object.keys(params).forEach(function eachParam(key) {
-	            if (['onSuccess', 'onError', 'reconnect', 'presence'].indexOf(key) === -1 && params[key] !== undefined) {
-	                clientSettings[key] = params[key];
-	            }
-	        });
-
-	        clientSettings.developmentMode = !!clientSettings.developmentMode;
-	        clientSettings.enableCallDebugReport = typeof clientSettings.enableCallDebugReport === 'boolean' ?
-	            clientSettings.enableCallDebugReport : true;
-
-	        if (typeof clientSettings.connectTimeoutMillis !== 'number') {
-	            clientSettings.connectTimeoutMillis = 10000;
-	        }
-
-	        if (typeof params.reconnect !== 'boolean') {
-	            clientSettings.reconnect = typeof clientSettings.developmentMode === 'boolean' ?
-	                clientSettings.developmentMode : false;
-	        } else {
-	            clientSettings.reconnect = !!params.reconnect;
-	        }
-	    }
-	    saveParameters(params);
-
-	    /**
-	     * Connect to the Respoke infrastructure and authenticate using `params.token`.
-	     *
-	     * After `connect`, the app auth session token is stored so it can be used in API requests.
-	     *
-	     * This method attaches quite a few event listeners for things like group joining and connection status changes.
-	     *
-	     * #### Usage
-	     *
-	     *      client.connect({
-	     *          appId: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX",
-	     *          token: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX", // if not developmentMode
-	     *          developmentMode: false || true,
-	     *          // if developmentMode, otherwise your server will set endpointId
-	     *          endpointId: "daveops"
-	     *      });
-	     *      client.listen("connect", function () { } );
-	     *
-	     *
-	     * If no `params.token` is given and `developmentMode` is set to true, it will attempt to obtain a token
-	     * automatically. You must set an `endpointId`.
-	     *
-	     *
-	     * #### App auth session token expiration
-	     *
-	     * If `params.reconnect` is set to true (which it is by default for `developmentMode`), the `client`
-	     * will attempt to keep reconnecting each time the app auth session expires.
-	     *
-	     * If not using `developmentMode`, automatic reconnect will be disabled. You will need to
-	     * listen to the Client's `disconnect` event to fetch a new brokered auth token and call
-	     * `client.connect()` with the new token.
-	     *
-	     *      client.listen('disconnect', function () {
-	     *
-	     *          // example method you implemented to get a new token from your server
-	     *          myServer.getNewRespokeAccessToken(function (newToken) {
-	     *              // reconnect with respoke.Client
-	     *              client.connect({ token: newToken });
-	     *          });
-	     *
-	     *      });
-	     *
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.connect
-	     * @param {object} params
-	     * @param {respoke.Client.connectSuccessHandler} [params.onSuccess] - Success handler for this invocation
-	     * of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @param {string} [params.appId] - The ID of your Respoke app. This must be passed either to
-	     * respoke.connect, respoke.createClient, or to client.connect.
-	     * @param {string} [params.token] - The endpoint's authentication token.
-	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
-	     * endpoint. This is only used when `developmentMode` is set to `true`.
-	     * @param {string|number|object|Array} [params.presence] The initial presence to set once connected.
-	     * @param {respoke.client.resolveEndpointPresence} [params.resolveEndpointPresence] An optional function for
-	     * resolving presence for an endpoint.  An endpoint can have multiple Connections this function will be used
-	     * to decide which Connection's presence gets precedence for the Endpoint.
-	     * @param {boolean} [params.developmentMode=false] - Indication to obtain an authentication token from the service.
-	     * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
-	     * operation and will limit the services you will be able to use.
-	     * @param {boolean} [params.reconnect=true] - Whether or not to automatically reconnect to the Respoke service
-	     * when a disconnect occurs.
-	     * @proprety {number} [connectTimeoutMillis=10000] - Number of milliseconds before considering the connect
-	     * timed out.
-	     * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
-	     * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves
-	     * a group.
-	     * @param {respoke.Client.onClientMessage} [params.onMessage] - Callback for when any message is
-	     * received from anywhere on the system.
-	     * @param {respoke.Client.onConnect} [params.onConnect] - Callback for Client connect.
-	     * @param {respoke.Client.onDisconnect} [params.onDisconnect] - Callback for Client disconnect.
-	     * @param {respoke.Client.onReconnect} [params.onReconnect] - Callback for Client reconnect. Not Implemented.
-	     * @param {respoke.Client.onCall} [params.onCall] - Callback for when this client receives a call.
-	     * @param {respoke.Client.onDirectConnection} [params.onDirectConnection] - Callback for when this
-	     * client receives a request for a direct connection.
-	     * @returns {Promise|undefined}
-	     * @fires respoke.Client#connect
-	     */
-	    that.connect = function (params) {
-	        var promise;
-	        var retVal;
-	        params = params || {};
-	        log.debug('Client.connect');
-	        that.connectTries += 1;
-
-	        saveParameters(params);
-	        that.presence = params.presence || that.presence;
-	        that.endpointId = clientSettings.endpointId;
-	        promise = actuallyConnect(params);
-	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
-	        promise.then(function successHandler() {
-	            /**
-	             * This event is fired the first time the library connects to the cloud infrastructure.
-	             * @event respoke.Client#connect
-	             * @type {respoke.Event}
-	             * @property {string} name - the event name.
-	             * @property {respoke.Client} target
-	             */
-	            that.fire('connect');
-	        });
-	        return retVal;
-	    };
-
-	    /**
-	     * This function contains the meat of the connection, the portions which can be repeated again on reconnect.
-	     *
-	     * When `reconnect` is true, this function will be added in an event listener to the Client#disconnect event.
-	     *
-	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.actuallyConnect
-	     * @private
-	     * @param {object} params
-	     * @param {connectSuccessHandler} [params.onSuccess] - Success handler for this invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @returns {Promise|undefined}
-	     */
-	    function actuallyConnect(params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-
-	        if (!clientSettings.token &&
-	                (!clientSettings.appId || !clientSettings.endpointId || clientSettings.developmentMode !== true)) {
-	            deferred.reject(new Error("Must pass either endpointID & appId & developmentMode=true, or a token, " +
-	                "to client.connect()."));
-	            return deferred.promise;
-	        }
-
-	        signalingChannel.open({
-	            actuallyConnect: actuallyConnect,
-	            endpointId: that.endpointId,
-	            token: clientSettings.token
-	        }).then(function successHandler() {
-	            return signalingChannel.authenticate();
-	        }).done(function successHandler() {
-	            // set initial presence for the connection
-	            if (that.presence) {
-	                that.setPresence({presence: that.presence});
-	            }
-
-	            /*
-	             * These rely on the EventEmitter checking for duplicate event listeners in order for these
-	             * not to be duplicated on reconnect.
-	             */
-
-	            /**
-	             * This event provides notification for when an incoming call is being received.  If the user wishes
-	             * to allow the call, `evt.call.answer()`.
-	             * @event respoke.Client#call
-	             * @type {respoke.Event}
-	             * @property {respoke.Call} call
-	             * @property {respoke.Endpoint} endpoint
-	             * @property {string} name - The event name.
-	             * @property {respoke.Client} target
-	             */
-	            that.listen('call', clientSettings.onCall);
-	            /**
-	             * This event is fired when the local end of the directConnection is available. It still will not be
-	             * ready to send and receive messages until the 'open' event fires.
-	             * @event respoke.Client#direct-connection
-	             * @type {respoke.Event}
-	             * @property {respoke.DirectConnection} directConnection
-	             * @property {respoke.Endpoint} endpoint
-	             * @property {string} name - the event name.
-	             * @property {respoke.Call} target
-	             */
-	            that.listen('direct-connection', clientSettings.onDirectConnection);
-	            that.listen('join', clientSettings.onJoin);
-	            /**
-	             * This event is fired every time the client leaves a group.
-	             * @event respoke.Client#leave
-	             * @type {respoke.Event}
-	             * @property {respoke.Group} group
-	             * @property {string} name - the event name.
-	             */
-	            that.listen('leave', clientSettings.onLeave);
-	            /**
-	             * A generic message handler when a message was received by the client.
-	             *
-	             * @event respoke.Client#message
-	             * @type {respoke.Event}
-	             * @property {string} name - The event name.
-	             * @property {respoke.Endpoint} endpoint - If the message was private, this is the Endpoint who sent it.
-	             * @property {respoke.Group} group - If the message was to a group, this is the group.
-	             * @property {respoke.TextMessage} message - The generic message object.
-	             * @property {string} message.connectionId
-	             * @property {string} message.endpointId
-	             * @property {string} message.message - Message body text.
-	             * @property {respoke.Client} target
-	             */
-	            that.listen('message', clientSettings.onMessage);
-	            that.listen('connect', clientSettings.onConnect);
-	            /**
-	             * Client has disconnected from Respoke.
-	             *
-	             * @event respoke.Client#disconnect
-	             * @type {respoke.Event}
-	             * @property {string} name - The event name.
-	             * @property {respoke.Client} target
-	             */
-	            that.listen('disconnect', clientSettings.onDisconnect);
-	            that.listen('disconnect', function () {
-	                that.calls.forEach(function (call) {
-	                    call.hangup({signal: false});
-	                });
-	            }, true);
-	            /**
-	             * Client has reconnected to Respoke.
-	             *
-	             * @event respoke.Client#reconnect
-	             * @type {respoke.Event}
-	             * @property {string} name - The event name.
-	             * @property {respoke.Client} target
-	             */
-	            that.listen('reconnect', clientSettings.onReconnect);
-
-	            log.info('logged in as ' + that.endpointId, that);
-	            deferred.resolve();
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	            if (err.message && err.message.match(/Connection limit exceeded/)) {
-	                log.error(
-	                    'You have reached the connection limit on the account associated with this appId. ' +
-	                    'Please upgrade your account from the developer portal at https://portal.respoke.io ' +
-	                    'if you need more concurrent connections.', err);
-	            } else {
-	                log.error(err.message, err.stack);
-	            }
-	        });
-
-	        return deferred.promise;
-	    }
-
-	    /**
-	     * Disconnect from the Respoke infrastructure, leave all groups, invalidate the token, and disconnect the websocket.
-	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.disconnect
-	     * @returns {Promise|undefined}
-	     * @param {object} params
-	     * @param {disconnectSuccessHandler} [params.onSuccess] - Success handler for this invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @fires respoke.Client#disconnect
-	     */
-	    that.disconnect = function (params) {
-	        // TODO: also call this on socket disconnect
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
-
-	        try {
-	            that.verifyConnected();
-	        } catch (e) {
-	            deferred.reject(e);
-	            return retVal;
-	        }
-
-	        var leaveGroups = groups.map(function eachGroup(group) {
-	            if (group.isJoined()) {
-	                return group.leave();
-	            }
-	        });
-
-	        Q.all(leaveGroups).fin(function successHandler() {
-	            return signalingChannel.close();
-	        }).fin(function finallyHandler() {
-	            that.presence = 'unavailable';
-	            endpoints = [];
-	            groups = [];
-	            /**
-	             * This event is fired when the library has disconnected from the cloud infrastructure.
-	             * @event respoke.Client#disconnect
-	             * @property {string} name - the event name.
-	             * @property {respoke.Client} target
-	             */
-	            that.fire('disconnect');
-	            deferred.resolve();
-	        }).done();
-
-	        return retVal;
-	    };
-
-	    /**
-	     * Set the presence for this client.
-	     *
-	     * The value of presence can be a string, number, object, or array - in any format -
-	     * depending on the needs of your application. The only requirement is that
-	     * `JSON.stringify()` must work (no circular references).
-	     *
-	     *      var myPresence = 'At lunch'
-	     *                      || 4
-	     *                      || { status: 'Away', message: 'At lunch' }
-	     *                      || ['Away', 'At lunch'];
-	     *
-	     *      client.setPresence({
-	     *          presence: myPresence,
-	     *          onSuccess: function (evt) {
-	     *              // successfully updated my presence
-	     *          }
-	     *      });
-	     *
-	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.setPresence
-	     * @param {object} params
-	     * @param {string|number|object|array} params.presence
-	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of
-	     * this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @return {Promise|undefined}
-	     */
-	    that.setPresence = function (params) {
-	        var promise;
-	        var retVal;
-	        params = params || {};
-	        params.presence = params.presence || 'available';
-
-	        try {
-	            that.verifyConnected();
-	        } catch (e) {
-	            promise = Q.reject(e);
-	            return respoke.handlePromise(promise, params.onSuccess, params.onError);
-	        }
-
-	        log.info('sending my presence update ' + params.presence);
-
-	        promise = signalingChannel.sendPresence({
-	            presence: params.presence
-	        }).then(function successHandler(p) {
-	            that.presence = params.presence;
-
-	            /**
-	             * This event indicates that the presence for this endpoint has been updated.
-	             * @event respoke.Client#presence
-	             * @type {respoke.Event}
-	             * @property {string|number|object|Array} presence
-	             * @property {string} name - the event name.
-	             * @property {respoke.Client} target
-	             */
-	            that.fire('presence', {
-	                presence: that.presence
-	            });
-	        });
-	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
-	        return retVal;
-	    };
-
-	    /**
-	     * Get the Call with the endpoint specified.
-	     *
-	     *     // hang up on chad
-	     *     var call = client.getCall({
-	     *         endpointId: 'chad'
-	     *     });
-	     *
-	     *     if (call) {
-	     *         call.hangup()
-	     *     }
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.getCall
-	     * @param {object} params
-	     * @param {string} [params.id] - Call ID.
-	     * @param {string} [params.endpointId] - Endpoint ID. Warning: If you pass only the endpointId, this method
-	     * will just return the first call that matches. If you are placing multiple calls to the same endpoint,
-	     * pass in the call ID, too.
-	     * @arg {boolean} [params.create] - whether or not to create a new call if the specified endpointId isn't found
-	     * @arg {string} [params.fromType] - fromType from the signal, tells us if this is a SIP or DID call.
-	     * @arg {string} [params.target] - target from the signal, tells us if this is a screenshare or conference call.
-	     * @returns {respoke.Call}
-	     */
-	    that.getCall = function (params) {
-	        var call = null;
-	        var methods = {
-	            screenshare: "startScreenShare",
-	            did: "startPhoneCall",
-	            web: "startCall",
-	            sip: "startSIPCall",
-	            conference: "joinConference"
-	        };
-	        var callParams = {};
-	        params.fromType = params.type || "web";
-	        var switchType = params.type;
-
-	        that.calls.every(function findCall(one) {
-	            if (params.id && one.id === params.id) {
-	                call = one;
-	                return false;
-	            }
-
-	            if (!params.id && params.endpointId && one.remoteEndpoint.id === params.endpointId) {
-	                call = one;
-	                return false;
-	            }
-	            return true;
-	        });
-
-	        if (call || params.create !== true) {
-	            return call;
-	        }
-
-	        callParams.id = params.id;
-	        callParams.caller = false;
-	        callParams.fromType = "web";
-	        callParams.callerId = params.callerId;
-	        callParams.target = params.target;
-
-	        if (params.target === "conference") {
-	            callParams.id = params.conferenceId;
-	            switchType = params.target;
-	        } else if (params.target === "screenshare") {
-	            switchType = params.target;
-	        }
-
-	        switch (switchType) {
-	            case "screenshare":
-	            case "web":
-	                callParams.toType = "web"; // overwrite "screenshare"
-	                callParams.endpointId = params.endpointId;
-	                break;
-	            case "did":
-	                callParams.number = params.endpointId;
-	                callParams.toType = "did";
-	                break;
-	            case "sip":
-	                callParams.uri = params.endpointId;
-	                callParams.toType = "sip";
-	                break;
-	        }
-
-	        try {
-	            call = that[methods[params.type]](callParams);
-	        } catch (e) {
-	            log.error("Couldn't create Call.", e.message, e.stack);
-	        }
-	        return call;
-	    };
-
-	    /**
-	     * Add the call to internal record-keeping.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.addCall
-	     * @param {object} evt
-	     * @param {respoke.Call} evt.call
-	     * @param {respoke.Endpoint} evt.endpoint
-	     * @private
-	     */
-	    function addCall(evt) {
-	        log.debug('addCall');
-	        if (!evt.call) {
-	            throw new Error("Can't add call without a call parameter.");
-	        }
-	        if (that.calls.indexOf(evt.call) === -1) {
-	            that.calls.push(evt.call);
-	        }
-
-	        evt.call.listen('hangup', function () {
-	            removeCall({call: evt.call});
-	        });
-	    }
-
-	    /**
-	     * Remove the call or direct connection from internal record-keeping.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.removeCall
-	     * @param {object} evt
-	     * @param {respoke.Call} evt.target
-	     * @private
-	     */
-	    function removeCall(evt) {
-	        var match = 0;
-	        if (!evt.call) {
-	            throw new Error("Can't remove call without a call parameter.");
-	        }
-
-	        // Loop backward since we're modifying the array in place.
-	        for (var i = that.calls.length - 1; i >= 0; i -= 1) {
-	            if (that.calls[i].id === evt.call.id) {
-	                that.calls.splice(i, 1);
-	                match += 1;
-	            }
-	        }
-
-	        if (match !== 1) {
-	            log.warn("Something went wrong.", match, "calls were removed!");
-	        }
-	    }
-
-	    /**
-	     * Convenience method for setting presence to `"available"`.
-	     *
-	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.setOnline
-	     * @param {object} params
-	     * @param {string|number|object|Array} [params.presence=available] - The presence to set.
-	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of
-	     * this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @returns {Promise|undefined}
-	     */
-	    that.setOnline = function (params) {
-	        var promise;
-
-	        params = params || {};
-	        params.presence = params.presence || 'available';
-
-	        try {
-	            that.verifyConnected();
-	        } catch (e) {
-	            promise = Q.reject(e);
-	            return respoke.handlePromise(promise, params.onSuccess, params.onError);
-	        }
-
-	        return that.setPresence(params);
-	    };
-
-	    /**
-	     * Convenience method for setting presence to `"unavailable"`.
-	     *
-	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.setOffline
-	     * @param {object} params
-	     * @param {string|number|object|Array} [params.presence=unavailable] - The presence to set.
-	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of
-	     * this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @returns {Promise|undefined}
-	     */
-	    that.setOffline = function (params) {
-	        var promise;
-
-	        params = params || {};
-	        params.presence = params.presence || 'unavailable';
-
-	        try {
-	            that.verifyConnected();
-	        } catch (e) {
-	            promise = Q.reject(e);
-	            return respoke.handlePromise(promise, params.onSuccess, params.onError);
-	        }
-
-	        return that.setPresence(params);
-	    };
-
-	    /**
-	     * Send a message to an endpoint.
-	     *
-	     *     client.sendMessage({
-	     *         endpointId: 'dan',
-	     *         message: "Jolly good."
-	     *     });
-	     *
-	     *
-	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.sendMessage
-	     * @param {object} params
-	     * @param {string} params.endpointId - The endpoint id of the recipient.
-	     * @param {string} [params.connectionId] - The optional connection id of the receipient. If not set, message will be
-	     * broadcast to all connections for this endpoint.
-	     * @param {string} params.message - a string message.
-	     * @param {sendHandler} [params.onSuccess] - Success handler for this invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @returns {Promise|undefined}
-	     */
-	    that.sendMessage = function (params) {
-	        var promise;
-	        var retVal;
-	        var endpoint;
-	        try {
-	            that.verifyConnected();
-	        } catch (e) {
-	            promise = Q.reject(e);
-	            retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
-	            return retVal;
-	        }
-	        endpoint = that.getEndpoint({
-	            skipPresence: true,
-	            id: params.endpointId
-	        });
-	        delete params.endpointId;
-	        return endpoint.sendMessage(params);
-	    };
-
-	    /**
-	     * Experimental. Create a new conference call with the specified id.
-	     *
-	     *     client.joinConference({
-	     *         id: "javascript-meetup",
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.joinConference
-	     * @private
-	     * @param {object} params
-	     * @param {string} params.id - The id that should be used to create the conference call or the ID
-	     * of the call to join.
-	     * @param {string|boolean} params.audio - Whether participant should send and receive audio. Boolean `true`
-	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
-	     * indicate send only and receive only respectively.
-	     * @param {string|boolean} params.video - Whether participant should send and receive audio. Boolean `true`
-	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
-	     * indicate send only and receive only respectively.
-	     * @param {boolean} params.mixAudio - Whether Respoke should mix all the audio streams together to save bandwidth
-	     * for this one participant.
-	     * @param {Array<RTCConstraints>} [params.constraints]
-	     * @arg {respoke.Conference.onJoin} [params.onJoin] - Callback for when a participant joins the conference.
-	     * @arg {respoke.Conference.onLeave} [params.onLeave] - Callback for when a participant leaves the conference.
-	     * @arg {respoke.Conference.onMessage} [params.onMessage] - Callback for when a message is sent to the conference.
-	     * @param {respoke.Conference.onMute} [params.onMute] - Callback for when local or remote media is muted or unmuted.
-	     * @arg {respoke.Conference.onTopic} [params.onTopic] - Callback for the conference topic changes.
-	     * @arg {respoke.Conference.onPresenter} [params.onPresenter] - Callback for when the presenter changes.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
-	     * and the remote party has received the video.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @returns {respoke.Conference}
-	     */
-	    that.joinConference = function (params) {
-	        var conference = null;
-	        var recipient;
-
-	        params = params || {};
-	        params.open = !!params.open;
-
-	        that.verifyConnected();
-
-	        if (!params.id) {
-	            params.id = respoke.makeGUID();
-	        }
-
-	        recipient = {id: params.id};
-
-	        if (params.open) {
-	            params.key = undefined;
-	        } else if (!params.key) {
-	            params.key = respoke.makeGUID();
-	        }
-
-	        params.instanceId = instanceId;
-	        params.target = "conference";
-	        params.constraints = respoke.convertConstraints(params.constraints, [{
-	            video: false,
-	            audio: true,
-	            mandatory: {},
-	            optional: []
-	        }]);
-
-	        params.signalOffer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'offer';
-	            signalParams.target = params.target;
-	            signalParams.id = params.id;
-	            signalParams.key = params.key;
-	            signalParams.open = params.open;
-	            signalParams.recipient = recipient;
-	            signalParams.toType = "conference";
-
-	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
-	        };
-	        params.signalAnswer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'answer';
-	            signalParams.target = params.target;
-	            signalParams.recipient = recipient;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalParams.toType = "conference";
-	            signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
-	                signalParams.call.hangup({signal: false});
-	            });
-	        };
-	        params.signalConnected = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.connectionId = signalParams.call.connectionId;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalParams.recipient = recipient;
-	            signalParams.toType = "conference";
-	            signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
-	                signalParams.call.hangup();
-	            });
-	        };
-	        params.signalModify = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.recipient = recipient;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalParams.toType = "conference";
-	            signalingChannel.sendModify(signalParams).done();
-	        };
-	        params.signalCandidate = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.recipient = recipient;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalParams.toType = "conference";
-	            return signalingChannel.sendCandidate(signalParams);
-	        };
-	        params.signalHangup = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.recipient = recipient;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalParams.toType = "conference";
-	            signalingChannel.sendHangup(signalParams).done();
-	        };
-	        params.signalReport = function (signalParams) {
-	            log.debug("Sending debug report", signalParams.report);
-	            signalingChannel.sendReport(signalParams).done();
-	        };
-
-	        params.signalingChannel = signalingChannel;
-	        conference = respoke.Conference(params);
-	        addCall({call: conference.call});
-	        return conference;
-	    };
-
-	    /**
-	     * Create a new screen sharing call. Screenshares are inherently unidirectional video only. This may change
-	     * in the future when Chrome adds the ability to obtain screen video and microphone audio at the same time. For
-	     * now, if you also need audio, place a second audio only call.
-	     *
-	     * The endpoint who calls `client.startScreenShare` will be the one whose screen is shared. If you'd like to
-	     * implement this as a screenshare request in which the endpoint who starts the call is the watcher and
-	     * not the sharer, it is recommened that you use `endpoint.sendMessage` to send a control message to the user
-	     * whose screenshare is being requested so that user's app can call `client.startScreenShare`.
-	     *
-	     * NOTE: At this time, screen sharing only works with Chrome, and Chrome requires a Chrome extension to
-	     * access screen sharing features. Please see instructions at https://github.com/respoke/respoke-chrome-extension.
-	     * Support for additional browsers will be added in the future.
-	     *
-	     *     client.startScreenShare({
-	     *         endpointId: 'tian',
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.startScreenShare
-	     * @param {object} params
-	     * @param {string} params.endpointId - The id of the endpoint that should be called.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
-	     * and the remote party has received the video.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @param {string} [params.source] - Pass in what type of mediaSource you want. If omitted, you'll have access
-	     * to both the screen and windows. In firefox, you'll have access to the screen only.
-	     * @returns {respoke.Call}
-	     */
-	    that.startScreenShare = function (params) {
-	        that.verifyConnected();
-	        var endpoint = that.getEndpoint({
-	            skipPresence: true,
-	            id: params.endpointId
-	        });
-	        delete params.endpointId;
-	        return endpoint.startScreenShare(params);
-	    };
-
-	    /**
-	     * Place an audio and/or video call to an endpoint.
-	     *
-	     *     // defaults to video when no constraints are supplied
-	     *     client.startCall({
-	     *         endpointId: 'erin',
-	     *         onConnect: function (evt) { },
-	     *         onLocalMedia: function (evt) { }
-	     *     });
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.startCall
-	     * @param {object} params
-	     * @param {string} params.endpointId - The id of the endpoint that should be called.
-	     * @param {Array<RTCConstraints>} [params.constraints]
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
-	     * with the local audio and/or video attached.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
-	     * with the remote audio and/or video attached.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
-	     * up.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have
-	     * local video attached to it.
-	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have
-	     * remote video attached to it.
-	     * @return {respoke.Call}
-	     */
-	    that.startCall = function (params) {
-	        that.verifyConnected();
-	        var endpoint = that.getEndpoint({
-	            skipPresence: true,
-	            id: params.endpointId
-	        });
-	        delete params.endpointId;
-	        return endpoint.startCall(params);
-	    };
-
-	    /**
-	     * Place an audio only call to an endpoint.
-	     *
-	     *     client.startAudioCall({
-	     *         endpointId: 'erin',
-	     *         onConnect: function (evt) { },
-	     *         onLocalMedia: function (evt) { }
-	     *     });
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.startAudioCall
-	     * @param {object} params
-	     * @param {string} params.endpointId - The id of the endpoint that should be called.
-	     * @param {string} [params.connectionId]
-	     * @param {Array<RTCConstraints>} [params.constraints]
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 element
-	     * with the local audio and/or video attached.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 element
-	     * with the remote audio and/or video attached.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
-	     * up.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
-	     * video attached to it.
-	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
-	     * video attached to it.
-	     * @return {respoke.Call}
-	     */
-	    that.startAudioCall = function (params) {
-	        that.verifyConnected();
-	        var endpoint = that.getEndpoint({
-	            skipPresence: true,
-	            id: params.endpointId
-	        });
-	        delete params.endpointId;
-	        return endpoint.startAudioCall(params);
-	    };
-
-	    /**
-	     * Place a video call to an endpoint.
-	     *
-	     *     client.startVideoCall({
-	     *         endpointId: 'erin',
-	     *         onConnect: function (evt) { },
-	     *         onLocalMedia: function (evt) { }
-	     *     });
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.startVideoCall
-	     * @param {object} params
-	     * @param {string} params.endpointId - The id of the endpoint that should be called.
-	     * @param {Array<RTCConstraints>} [params.constraints]
-	     * @param {string} [params.connectionId]
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
-	     * with the local audio and/or video attached.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
-	     * with the remote audio and/or video attached.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
-	     * up.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
-	     * video attached to it.
-	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
-	     * video attached to it.
-	     * @return {respoke.Call}
-	     */
-	    that.startVideoCall = function (params) {
-	        that.verifyConnected();
-	        var endpoint = that.getEndpoint({
-	            skipPresence: true,
-	            id: params.endpointId
-	        });
-	        delete params.endpointId;
-	        return endpoint.startVideoCall(params);
-	    };
-
-	    /**
-	     * Place an audio call with a phone number.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.startPhoneCall
-	     * @param {object} params
-	     * @param {string} params.number - The phone number that should be called.
-	     * @param {string} params.callerId - The phone number to use as the caller ID for this phone call. This must
-	     * be a phone number listed in your Respoke account, associated with your app, and allowed by the role
-	     * that this client is authenticated with. If the role contains a list of numbers and the token does not contain
-	     * callerId, this field must be used to set caller ID selected from the list of numbers or no caller ID will be set.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
-	     * with the local audio and/or video attached.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
-	     * with the remote audio and/or video attached.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
-	     * up.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @return {respoke.Call}
-	     */
-	    that.startPhoneCall = function (params) {
-	        var promise;
-	        var call = null;
-	        var recipient = {};
-	        params = params || {};
-	        params.constraints = [{
-	            video: false,
-	            audio: true,
-	            mandatory: {},
-	            optional: []
-	        }];
-
-	        that.verifyConnected();
-
-	        if (!params.number) {
-	            throw new Error("Can't start a phone call without a number.");
-	        }
-
-	        if (typeof params.caller !== 'boolean') {
-	            params.caller = true;
-	        }
-
-	        recipient.id = params.number;
-
-	        params.instanceId = instanceId;
-	        params.remoteEndpoint = recipient;
-
-	        params.toType = params.toType || 'did';
-	        params.fromType = params.fromType || 'web';
-
-	        params.signalOffer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'offer';
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-
-	            // using hasOwnProperty here because callerId could be explicitly set to null or empty string
-	            if (params.hasOwnProperty('callerId')) {
-	                signalParams.callerId = {number: params.callerId};
-	            }
-	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
-	        };
-	        params.signalAnswer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'answer';
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
-	                log.error("Couldn't answer the call.", err.message, err.stack);
-	                signalParams.call.hangup({signal: false});
-	            });
-	        };
-	        params.signalConnected = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.connectionId = signalParams.connectionId;
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
-	                log.error("Couldn't send connected.", err.message, err.stack);
-	                signalParams.call.hangup();
-	            });
-	        };
-	        params.signalModify = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendModify(signalParams).done(null, function errorHandler(err) {
-	                log.error("Couldn't send modify.", err.message, err.stack);
-	            });
-	        };
-	        params.signalCandidate = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            return signalingChannel.sendCandidate(signalParams);
-	        };
-	        params.signalHangup = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendHangup(signalParams).done(null, function errorHandler(err) {
-	                log.error("Couldn't send hangup.", err.message, err.stack);
-	            });
-	        };
-	        params.signalReport = function (signalParams) {
-	            log.debug("Sending debug report", signalParams.report);
-	            signalingChannel.sendReport(signalParams);
-	        };
-
-	        params.signalingChannel = signalingChannel;
-	        call = respoke.Call(params);
-	        addCall({call: call});
-	        return call;
-	    };
-
-	    /**
-	     * Place an audio call to a SIP URI.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.startSIPCall
-	     * @param {object} params
-	     * @param {string} [params.uri] - The fully qualified SIP URI to call.
-	     * @param {string} [params.trunk] - The SIP trunk to call. This is not necessary if `uri` is set. If `uri` is not
-	     * set, both `trunk` and `user` are required, and `trunk` must be the ID of a Respoke SIP trunk. `user` is a
-	     * SIP username or extension.
-	     * @param {string} [params.user] - The SIP user to call. This is not necessary if `uri` is set. If `uri` is not
-	     * set, both `trunk` and `user` are required, and `trunk` must be the ID of a Respoke SIP trunk. `user` is a
-	     * SIP username or extension.
-	     * @param {object} [params.callerId] - Caller ID information for this call.
-	     * @param {string} [params.callerId.name] - Caller ID name.
-	     * @param {string} [params.callerId.number] - Caller ID number, extension, or SIP username.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
-	     * with the local audio and/or video attached.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
-	     * with the remote audio and/or video attached.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
-	     * up.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @return {respoke.Call}
-	     */
-	    that.startSIPCall = function (params) {
-	        var promise;
-	        var call = null;
-	        var recipient = {};
-	        params = params || {};
-	        params.constraints = [{
-	            video: false,
-	            audio: true,
-	            mandatory: {},
-	            optional: []
-	        }];
-
-	        that.verifyConnected();
-
-	        if (!params.uri && !(params.trunk && params.user)) {
-	            throw new Error("Can't start a phone call without a SIP URI or a SIP trunk and user.");
-	        }
-
-	        if (typeof params.caller !== 'boolean') {
-	            params.caller = true;
-	        }
-
-	        params.uri = params.uri || (params.trunk + "/" + params.user);
-	        recipient.id = params.uri;
-
-	        params.instanceId = instanceId;
-	        params.remoteEndpoint = recipient;
-
-	        params.toType = params.toType || 'sip';
-	        params.fromType = params.fromType || 'web';
-
-	        params.signalOffer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'offer';
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-
-	            // using hasOwnProperty here because callerId could be explicitly set to null or empty string
-	            if (params.hasOwnProperty('callerId')) {
-	                signalParams.callerId = params.callerId;
-	            }
-	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
-	        };
-	        params.signalAnswer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'answer';
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
-	                log.error("Couldn't answer the call.", err.message, err.stack);
-	                signalParams.call.hangup({signal: false});
-	            });
-	        };
-	        params.signalConnected = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.connectionId = signalParams.connectionId;
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
-	                log.error("Couldn't send connected.", err.message, err.stack);
-	                signalParams.call.hangup();
-	            });
-	        };
-	        params.signalModify = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendModify(signalParams).done(null, function errorHandler(err) {
-	                log.error("Couldn't send modify.", err.message, err.stack);
-	            });
-	        };
-	        params.signalCandidate = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            return signalingChannel.sendCandidate(signalParams);
-	        };
-	        params.signalHangup = function (signalParams) {
-	            signalParams.target = 'call';
-	            signalParams.recipient = recipient;
-	            signalParams.toType = params.toType;
-	            signalParams.fromType = params.fromType;
-	            signalingChannel.sendHangup(signalParams).done(null, function errorHandler(err) {
-	                log.error("Couldn't send hangup.", err.message, err.stack);
-	            });
-	        };
-	        params.signalReport = function (signalParams) {
-	            log.debug("Sending debug report", signalParams.report);
-	            signalingChannel.sendReport(signalParams);
-	        };
-
-	        params.signalingChannel = signalingChannel;
-	        call = respoke.Call(params);
-	        addCall({call: call});
-	        return call;
-	    };
-
-	    /**
-	     * Assert that we are connected to the backend infrastructure.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.verifyConnected
-	     * @throws {Error}
-	     * @private
-	     */
-	    that.verifyConnected = function () {
-	        if (!signalingChannel.isConnected()) {
-	            throw new Error("Can't complete request when not connected. Please reconnect!");
-	        }
-	    };
-
-	    /**
-	     * Check whether this client is connected to the Respoke API.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.isConnected
-	     * @returns boolean
-	     */
-	    that.isConnected = function () {
-	        return signalingChannel.isConnected();
-	    };
-
-	    /**
-	     * Join a group and begin keeping track of it. If this method is called multiple times synchronously, it will
-	     * batch requests and only make one API call to Respoke.
-	     *
-	     * You can leave the group by calling `group.leave()`;
-	     *
-	     * ##### Joining and leaving a group
-	     *
-	     *      var group;
-	     *
-	     *      client.join({
-	     *          id: "book-club",
-	     *          onSuccess: function (evt) {
-	     *              console.log('I joined', evt.group.id);
-	     *              // "I joined book-club"
-	     *              group = evt.group;
-	     *              group.sendMessage({
-	     *                  message: 'sup'
-	     *              });
-	     *          }
-	     *      });
-	     *
-	     *      // . . .
-	     *      // Some time later, leave the group.
-	     *      // . . .
-	     *      group.leave({
-	     *          onSuccess: function (evt) {
-	     *              console.log('I left', evt.group.id);
-	     *              // "I left book-club"
-	     *          }
-	     *      });
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.join
-	     * @param {object} params
-	     * @param {string} params.id - The name of the group.
-	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of
-	     * this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @param {respoke.Group.onMessage} [params.onMessage] - Message handler for messages from this group only.
-	     * @param {respoke.Group.onJoin} [params.onJoin] - Join event listener for endpoints who join this group only.
-	     * @param {respoke.Group.onLeave} [params.onLeave] - Leave event listener for endpoints who leave
-	     * this group only.
-	     * @returns {Promise<respoke.Group>|undefined} The instance of the respoke.Group which the client joined.
-	     * @fires respoke.Client#join
-	     */
-	    that.join = function (params) {
-	        var deferred = Q.defer();
-	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
-	        try {
-	            that.verifyConnected();
-	        } catch (e) {
-	            deferred.reject(e);
-	            return retVal;
-	        }
-
-	        if (!params.id) {
-	            deferred.reject(new Error("Can't join a group with no group id."));
-	            return retVal;
-	        }
-
-	        log.trace('requested to join group', params.id);
-
-	        signalingChannel.joinGroup({
-	            groupList: [params.id]
-	        }).done(function successHandler() {
-	            var group;
-	            params.signalingChannel = signalingChannel;
-	            params.instanceId = instanceId;
-
-	            group = that.getGroup({id: params.id});
-
-	            if (!group) {
-	                group = respoke.Group(params);
-	                that.addGroup(group);
-	            }
-
-	            group.listen('join', params.onJoin);
-	            group.listen('leave', params.onLeave);
-	            group.listen('message', params.onMessage);
-
-	            group.addMember({
-	                connection: that.getConnection({
-	                    endpointId: that.endpointId,
-	                    connectionId: that.connectionId
-	                })
-	            });
-
-	            /**
-	             * This event is fired every time the client joins a group. If the client leaves
-	             * a group, this event will be fired again on the next time the client joins the group.
-	             * @event respoke.Client#join
-	             * @type {respoke.Event}
-	             * @property {respoke.Group} group
-	             * @property {string} name - the event name.
-	             */
-	            that.fire('join', {
-	                group: group
-	            });
-	            deferred.resolve(group);
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-	        return retVal;
-	    };
-
-	    /**
-	     * Add a Group. This is called when we join a group and need to begin keeping track of it.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.addGroup
-	     * @param {respoke.Group}
-	     * @private
-	     */
-	    that.addGroup = function (newGroup) {
-	        if (!newGroup || newGroup.className !== 'respoke.Group') {
-	            throw new Error("Can't add group to internal tracking without a group.");
-	        }
-
-	        newGroup.listen('leave', function leaveHandler(evt) {
-	            var endpointThatLeft = evt.connection.getEndpoint();
-
-	            if (!endpointThatLeft.hasListeners('presence') && endpointThatLeft.groupConnectionCount === 0) {
-	                // No one is listening, and it's not in any more groups.
-	                endpoints.every(function eachEndpoint(ept, index) {
-	                    if (ept.id === endpointThatLeft.id) {
-	                        endpoints.splice(index, 1);
-	                        return false;
-	                    }
-	                    return true;
-	                });
-	            }
-	        }, true);
-
-	        groups.push(newGroup);
-	    };
-
-	    /**
-	     * Get a list of all the groups the client is currently a member of.
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.getGroups
-	     * @returns {Array<respoke.Group>} All of the groups the library is aware of.
-	     */
-	    that.getGroups = function () {
-	        return groups;
-	    };
-
-	    /**
-	     * Find a group by id and return it.
-	     *
-	     *     var group = client.getGroup({
-	     *         id: "resistance"
-	     *     });
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.getGroup
-	     * @param {object} params
-	     * @param {string} params.id
-	     * @param {respoke.Group.onJoin} [params.onJoin] - Receive notification that an endpoint has joined this group.
-	     * @param {respoke.Group.onLeave} [params.onLeave] - Receive notification that an endpoint has left this group.
-	     * @param {respoke.Group.onMessage} [params.onMessage] - Receive notification that a message has been
-	     * received to a group.
-	     * @returns {respoke.Group|undefined} The group whose ID was specified.
-	     */
-	    that.getGroup = function (params) {
-	        var group;
-	        if (!params || !params.id) {
-	            throw new Error("Can't get a group without group id.");
-	        }
-
-	        groups.every(function eachGroup(grp) {
-	            if (grp.id === params.id) {
-	                group = grp;
-	                return false;
-	            }
-	            return true;
-	        });
-
-	        if (group) {
-	            group.listen('join', params.onJoin);
-	            group.listen('leave', params.onLeave);
-	            group.listen('message', params.onMessage);
-	        }
-
-	        return group;
-	    };
-
-	    /**
-	     * Find an endpoint by id and return the `respoke.Endpoint` object.
-	     *
-	     * If it is not already cached locally, will be added to the local cache of tracked endpoints,
-	     * its presence will be determined, and will be available in `client.getEndpoints()`.
-	     *
-	     *     var endpoint = client.getEndpoint({
-	     *         id: "dlee"
-	     *     });
-	     *
-	     * @ignore If the endpoint is not found in the local cache of endpoint objects (see `client.getEndpoints()`),
-	     * it will be created. This is useful, for example, in the case of dynamic endpoints where groups are
-	     * not in use. Override dynamic endpoint creation by setting `params.skipCreate = true`.
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.getEndpoint
-	     * @param {object} params
-	     * @param {string} params.id
-	     * @param {respoke.Endpoint.onMessage} [params.onMessage] - Handle messages sent to the logged-in user
-	     * from this one Endpoint.
-	     * @param {respoke.Endpoint.onPresence} [params.onPresence] - Handle presence notifications from this one
-	     * Endpoint.
-	     * @arg {boolean} [params.skipCreate] - Skip the creation step and return undefined if we don't yet
-	     * @arg {boolean} [params.skipPresence] - Skip registering for this endpoint's presence.
-	     * @returns {respoke.Endpoint} The endpoint whose ID was specified.
-	     */
-	    that.getEndpoint = function (params) {
-	        var endpoint;
-	        if (!params || !params.id) {
-	            throw new Error("Can't get an endpoint without endpoint id.");
-	        }
-
-	        endpoints.every(function eachEndpoint(ept) {
-	            if (ept.id === params.id) {
-	                endpoint = ept;
-	                return false;
-	            }
-	            return true;
-	        });
-
-	        if (!endpoint && params && !params.skipCreate) {
-	            params.instanceId = instanceId;
-	            params.signalingChannel = signalingChannel;
-	            params.resolveEndpointPresence = clientSettings.resolveEndpointPresence;
-	            params.addCall = addCall;
-
-	            endpoint = respoke.Endpoint(params);
-	            endpoints.push(endpoint);
-	        }
-
-	        if (!endpoint) {
-	            return;
-	        }
-
-	        if (params.skipPresence !== true) {
-	            signalingChannel.registerPresence({
-	                endpointList: [endpoint.id]
-	            }).done(null, function (err) {
-	                log.error("Couldn't register for presence on", endpoint.id, err.message);
-	            });
-	        }
-	        endpoint.listen('presence', params.onPresence);
-	        endpoint.listen('message', params.onMessage);
-
-	        return endpoint;
-	    };
-
-	    /**
-	     * Find a Connection by id and return it.
-	     *
-	     *     var connection = client.getConnection({
-	     *         id: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX"
-	     *     });
-	     *
-	     * @ignore In most cases, if we don't find it we will create it. This is useful
-	     * in the case of dynamic endpoints where groups are not in use. Set skipCreate=true
-	     * to return undefined if the Connection is not already known.
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.getConnection
-	     * @param {object} params
-	     * @param {string} params.connectionId
-	     * @param {string} [params.endpointId] - An endpointId to use in the creation of this connection.
-	     * @param {respoke.Endpoint.onMessage} [params.onMessage] - Handle messages sent to the logged-in user
-	     * from this one Connection.
-	     * @param {respoke.Endpoint.onPresence} [params.onPresence] - Handle presence notifications from this one
-	     * Connection.
-	     * @returns {respoke.Connection} The connection whose ID was specified.
-	     */
-	    that.getConnection = function (params) {
-	        var connection;
-	        var endpoint;
-	        var endpointsToSearch = endpoints;
-
-	        params = params || {};
-	        if (!params.connectionId) {
-	            throw new Error("Can't get a connection without connection id.");
-	        }
-	        if (!params.endpointId && !params.skipCreate) {
-	            throw new Error("Can't create a connection without endpoint id.");
-	        }
-
-	        if (params.endpointId) {
-	            endpoint = that.getEndpoint({
-	                id: params.endpointId,
-	                skipPresence: true,
-	                skipCreate: params.skipCreate
-	            });
-
-	            endpointsToSearch = [];
-	            if (endpoint) {
-	                endpointsToSearch = [endpoint];
-	            }
-	        }
-
-	        endpointsToSearch.every(function eachEndpoint(ept) {
-	            connection = ept.getConnection(params);
-	            return !connection;
-	        });
-
-	        if (!connection && !params.skipCreate) {
-	            params.instanceId = instanceId;
-	            connection = respoke.Connection(params);
-	            endpoint.connections.push(connection);
-	        }
-
-	        return connection;
-	    };
-
-	    /**
-	     * Get the list of **all endpoints** that the library has knowledge of.
-	     * These are `respoke.Endpoint` objects, not just the endpointIds.
-	     *
-	     * The library gains knowledge of an endpoint in two ways:
-	     * 1. when an endpoint joins a group that the user (currently logged-in endpoint) is a member of (if group presence is enabled)
-	     * 2. when an endpoint that the user (currently logged-in endpoint) is watching*
-	     *
-	     * *If an endpoint that the library does not know about sends a message to the client, you
-	     * can immediately call the `client.getEndpoint()` method on the sender of the message to enable
-	     * watching of the sender's endpoint.
-	     *
-	     *      client.on('message', function (data) {
-	     *          if (data.endpoint) {
-	     *              // start tracking this endpoint.
-	     *              client.getEndpoint({ id: data.endpoint.id });
-	     *          }
-	     *      });
-	     *
-	     *
-	     * @memberof! respoke.Client
-	     * @method respoke.Client.getEndpoints
-	     * @returns {Array<respoke.Endpoint>}
-	     */
-	    that.getEndpoints = function () {
-	        return endpoints;
-	    };
-
-	    /**
-	     * Get conference participants by conference id.
-	     *
-	     * ```
-	     * client.getConferenceParticipants({ id: 'mygroup' }).done(function (participants) {
-	     *     var ids = participants.map(function (p) { return p.endpointId; });
-	     *     console.log(ids); // ['person1', 'person2']
-	     * });
-	     * ```
-	     * @memberof respoke.Client
-	     * @method respoke.Client.getConferenceParticipants
-	     * @param object {params}
-	     * @param string {params.id}
-	     * @returns {Promise}
-	     */
-	    that.getConferenceParticipants = signalingChannel.getConferenceParticipants;
-
-	    return that;
-	}; // End respoke.Client
-
-	/**
-	 * Handle sending successfully.
-	 * @callback respoke.Client.successHandler
-	 */
-	/**
-	 * Handle joining a group successfully. This callback is called only once when Client.join() is called.
-	 * @callback respoke.Client.joinHandler
-	 * @param {respoke.Group} group
-	 */
-	/**
-	 * Receive notification that the client has joined a group. This callback is called everytime
-	 * respoke.Client#join is fired.
-	 * @callback respoke.Client.onJoin
-	 * @param {respoke.Event} evt
-	 * @param {respoke.Group} evt.group
-	 * @param {string} evt.name - the event name.
-	 */
-	/**
-	 * Receive notification that the client has left a group. This callback is called everytime
-	 * respoke.Client#leave is fired.
-	 * @callback respoke.Client.onLeave
-	 * @param {respoke.Event} evt
-	 * @param {respoke.Group} evt.group
-	 * @param {string} evt.name - the event name.
-	 */
-	/**
-	 * Receive notification that a message has been received. This callback is called every time
-	 * respoke.Client#message is fired.
-	 * @callback respoke.Client.onClientMessage
-	 * @param {respoke.Event} evt
-	 * @param {respoke.TextMessage} evt.message
-	 * @param {respoke.Group} [evt.group] - If the message is to a group we already know about,
-	 * this will be set. If null, the developer can use client.join({id: evt.message.header.channel}) to join
-	 * the group. From that point forward, Group#message will fire when a message is received as well. If
-	 * group is undefined instead of null, the message is not a group message at all.
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Client} evt.target
-	 */
-	/**
-	 * Receive notification that the client is receiving a call from a remote party. This callback is called every
-	 * time respoke.Client#call is fired.
-	 * @callback respoke.Client.onCall
-	 * @param {respoke.Event} evt
-	 * @param {respoke.Call} evt.call
-	 * @param {respoke.Endpoint} evt.endpoint
-	 * @param {string} evt.name - the event name.
-	 */
-	/**
-	 * Receive notification that the client is receiving a request for a direct connection from a remote party.
-	 * This callback is called every time respoke.Client#direct-connection is fired.
-	 * @callback respoke.Client.onDirectConnection
-	 * @param {respoke.Event} evt
-	 * @param {respoke.DirectConnection} evt.directConnection
-	 * @param {respoke.Endpoint} evt.endpoint
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Call} evt.target
-	 */
-	/**
-	 * Receive notification Respoke has successfully connected to the cloud. This callback is called every time
-	 * respoke.Client#connect is fired.
-	 * @callback respoke.Client.onConnect
-	 * @param {respoke.Event} evt
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Client} evt.target
-	 */
-	/**
-	 * Receive notification Respoke has successfully disconnected from the cloud. This callback is called every time
-	 * respoke.Client#disconnect is fired.
-	 * @callback respoke.Client.onDisconnect
-	 * @param {respoke.Event} evt
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Client} evt.target
-	 */
-	/**
-	 * Receive notification Respoke has successfully reconnected to the cloud. This callback is called every time
-	 * respoke.Client#reconnect is fired.
-	 * @callback respoke.Client.onReconnect
-	 * @param {respoke.Event} evt
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Client} evt.target
-	 */
-	/**
-	 * Handle disconnection to the cloud successfully.
-	 * @callback respoke.Client.disconnectSuccessHandler
-	 */
-	/**
-	 * Handle an error that resulted from a method call.
-	 * @callback respoke.Client.errorHandler
-	 * @params {Error} err
-	 */
-	/**
-	 * Handle connection to the cloud successfully.
-	 * @callback respoke.Client.connectSuccessHandler
-	 */
-
-
-/***/ },
-/* 8 */
-/***/ function(module, exports, __webpack_require__) {
-
-	/*
-	 * Copyright 2015, Digium, Inc.
-	 * All rights reserved.
-	 *
-	 * This source code is licensed under The MIT License found in the
-	 * LICENSE file in the root directory of this source tree.
-	 *
-	 * For all details and documentation:  https://www.respoke.io
-	 */
-
-	var respoke = __webpack_require__(1);
-
-	/**
-	 * A `respoke.Connection` always belongs to an Endpoint.
-	 *
-	 * There is a distinction between Endpoint and Connection because an Endpoint can be authenticated
-	 * from multiple devices, browsers, or browser tabs. Each of these separate authentications is a Connection.
-	 * A Client can choose to interact with connections of the same endpoint in different ways.
-	 *
-	 * @constructor
-	 * @class respoke.Connection
-	 * @augments respoke.EventEmitter
-	 * @param {object} params
-	 * @param {string} params.id
-	 * @returns {respoke.Connection}
-	 */
-	module.exports = function (params) {
-	    "use strict";
-	    params = params || {};
-	    /**
-	     * @memberof! respoke.Connection
-	     * @name instanceId
-	     * @private
-	     * @type {string}
-	     */
-	    var instanceId = params.instanceId;
-	    var that = respoke.EventEmitter(params);
-	    /**
-	     * @memberof! respoke.DirectConnection
-	     * @name client
-	     * @type {respoke.Client}
-	     * @private
-	     */
-	    var client = respoke.getClient(instanceId);
-
-	    /**
-	     * The connection id.
-	     * @memberof! respoke.Connection
-	     * @name id
-	     * @type {string}
-	     */
-	    that.id = that.id || that.connectionId;
-	    if (!that.id) {
-	        throw new Error("Can't make a connection without an id.");
-	    }
-	    delete that.instanceId;
-	    delete that.connectionId;
-
-	    /**
-	     * A name to identify the type of this object.
-	     * @memberof! respoke.Connection
-	     * @name className
-	     * @type {string}
-	     */
-	    that.className = 'respoke.Connection';
-
-	    /**
-	     * Represents the presence status. Typically a string, but other types are supported.
-	     * Defaults to `'unavailable'`.
-	     *
-	     * **Do not modify this directly** - it won't update presence with Respoke. Presence must be updated
-	     * by the remote endpoint.
-	     *
-	     * @memberof! respoke.Connection
-	     * @name presence
-	     * @type {string|number|object|Array}
-	     */
-	    that.presence = 'unavailable';
-
-	    /**
-	     * Deprecated: use endpoint.presence instead.
-	     *
-	     * Return the presence.
-	     * @memberof! respoke.Connection
-	     * @deprecated
-	     * @name presence
-	     * @type {string|number|object|Array}
-	     */
-	    that.getPresence = function () {
-	        return that.presence;
-	    };
-
-	    /**
-	     * Send a message to this connection of an endpoint. If the endpoint has multiple connections,
-	     * it will only receive the message at this connection.
-	     *
-	     *     connection.sendMessage({
-	     *         message: "PJ, put that PBR down!"
-	     *     });
-	     *
-	     * **Using callbacks** will disable promises.
-	     * @memberof! respoke.Connection
-	     * @method respoke.Connection.sendMessage
-	     * @param {object} params
-	     * @param {string} params.message
-	     * @param {boolean} [params.ccSelf=false] Copy this client's own endpoint on this message so that they arrive
-	     * at other devices it might be logged into elsewhere.
-	     * @param {boolean} [params.push=false] Whether or not the message should be considered for push notifications to
-	     * mobile devices.
-	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation
-	     * of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @returns {Promise|undefined}
-	     */
-	    that.sendMessage = function (params) {
-	        params = params || {};
-	        params.connectionId = that.id;
-	        params.ccSelf = (typeof params.ccSelf === "boolean" ? params.ccSelf : false);
-	        return that.getEndpoint().sendMessage(params);
-	    };
-
-	    /**
-	     * Create a new screen sharing call. Screenshares are inherently unidirectional video only. This may change
-	     * in the future when Chrome adds the ability to obtain screen video and microphone audio at the same time. For
-	     * now, if you also need audio, place a second audio only call.
-	     *
-	     * The endpoint who calls `connection.startScreenShare` will be the one whose screen is shared. If you'd like to
-	     * implement this as a screenshare request in which the endpoint who starts the call is the watcher and
-	     * not the sharer, it is recommened that you use `endpoint.sendMessage` to send a control message to the user
-	     * whose screenshare is being requested so that user's app can call `connection.startScreenShare`.
-	     *
-	     * NOTE: At this time, screen sharing only works with Chrome, and Chrome requires a Chrome extension to
-	     * access screen sharing features. Please see instructions at https://github.com/respoke/respoke-chrome-extension.
-	     * Support for additional browsers will be added in the future.
-	     *
-	     *     connection.startScreenShare({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Connection
-	     * @method respoke.Connection.startScreenShare
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
-	     * and the remote party has received the video.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @returns {respoke.Call}
-	     */
-	    that.startScreenShare = function (params) {
-	        client.verifyConnected();
-	        params.connectionId = that.id;
-	        return that.getEndpoint().startScreenShare(params);
-	    };
-
-	    /**
-	     * Create a new Call for a voice and/or video call this particular connection, only. The Call cannot be answered
-	     * by another connection of this Endpoint.
-	     *
-	     *     connection.startCall({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Connection
-	     * @method respoke.Connection.startCall
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
-	     * element with the remote
-	     * audio and/or video attached.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {RTCConstraints} [params.constraints]
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
-	     * video attached to it.
-	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
-	     * video attached to it.
-	     * @returns {respoke.Call}
-	     */
-	    that.startCall = function (params) {
-	        params = params || {};
-	        params.connectionId = that.id;
-	        return that.getEndpoint().startCall(params);
-	    };
-
-	    /**
-	     * Create a new audio-only call.
-	     *
-	     *     connection.startAudioCall({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Connection
-	     * @method respoke.Connection.startAudioCall
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
-	     * element with the remote
-	     * audio and/or video attached.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @returns {respoke.Call}
-	     */
-	    that.startAudioCall = function (params) {
-	        client.verifyConnected();
-	        params.connectionId = that.id;
-	        return that.getEndpoint().startAudioCall(params);
-	    };
-
-	    /**
-	     * Create a new call with audio and video.
-	     *
-	     *     connection.startVideoCall({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Connection
-	     * @method respoke.Connection.startVideoCall
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
-	     * element with the remote
-	     * audio and/or video attached.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has
-	     * been hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @returns {respoke.Call}
-	     */
-	    that.startVideoCall = function (params) {
-	        client.verifyConnected();
-	        params.connectionId = that.id;
-	        return that.getEndpoint().startVideoCall(params);
-	    };
-
-	    /**
-	     * Create a new DirectConnection with this particular connection, only. The DirectConnection cannot be answered
-	     * by another connection of this Endpoint.  This method creates a new Call as well, attaching this
-	     * DirectConnection to it for the purposes of creating a peer-to-peer link for sending data such as messages to
-	     * the other endpoint. Information sent through a DirectConnection is not handled by the cloud infrastructure.
-	     *
-	     *     connection.startDirectConnection({
-	     *         onOpen: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Connection
-	     * @method respoke.Connection.startDirectConnection
-	     * @param {object} params
-	     * @param {respoke.Call.directConnectionSuccessHandler} [params.onSuccess] - Success handler for this
-	     * invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @param {respoke.DirectConnection.onStart} [params.onStart] - A callback for when setup of the direct
-	     * connection begins. The direct connection will not be open yet.
-	     * @param {respoke.DirectConnection.onOpen} [params.onOpen] - A callback for receiving notification of when
-	     * the DirectConnection is open and ready to be used.
-	     * @param {respoke.DirectConnection.onError} [params.onError] - Callback for errors setting up the direct
-	     * connection.
-	     * @param {respoke.DirectConnection.onClose} [params.onClose] - A callback for receiving notification of
-	     * when the DirectConnection is closed and the two Endpoints are disconnected.
-	     * @param {respoke.DirectConnection.onMessage} [params.onMessage] - A callback for receiving messages sent
-	     * through the DirectConnection.
-	     * @param {respoke.DirectConnection.onAccept} [params.onAccept] - Callback for when the user accepts the
-	     * request for a direct connection and setup begins.
-	     * @returns {respoke.DirectConnection} The DirectConnection which can be used to send data and messages
-	     * directly to the other endpoint.
-	     */
-	    that.startDirectConnection = function (params) {
-	        var retVal;
-	        var deferred;
-	        params = params || {};
-
-	        try {
-	            client.verifyConnected();
-	        } catch (err) {
-	            deferred = respoke.Q.defer();
-	            retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
-	            deferred.reject(err);
-	            return retVal;
-	        }
-
-	        params.connectionId = that.id;
-	        return that.getEndpoint().startDirectConnection(params);
-	    };
-
-	    /**
-	     * Get the Endpoint that this Connection belongs to.
-	     * @memberof! respoke.Connection
-	     * @method respoke.Connection.getEndpoint
-	     * @returns {respoke.Endpoint}
-	     */
-	    that.getEndpoint = function () {
-	        return client.getEndpoint({
-	            id: that.endpointId,
-	            skipPresence: true
-	        });
-	    };
-
-	    return that;
-	}; // End respoke.Connection
-
-
-/***/ },
-/* 9 */
-/***/ function(module, exports, __webpack_require__) {
-
-	/*
-	 * Copyright 2015, Digium, Inc.
-	 * All rights reserved.
-	 *
-	 * This source code is licensed under The MIT License found in the
-	 * LICENSE file in the root directory of this source tree.
-	 *
-	 * For all details and documentation:  https://www.respoke.io
-	 */
-
-	var Q = __webpack_require__(6);
-	var respoke = __webpack_require__(1);
-	var log = respoke.log;
-
-	/**
-	 * `respoke.Endpoint`s are users of a Respoke app.
-	 * An Endpoint can be a person in a browser or device, or an app using Respoke APIs from a server.
-	 * A Client can interact with endpoints through messages, audio or video calls, or direct connections.
-	 * An Endpoint may be authenticated from multiple devices to the same app (each of which is
-	 * represented by a Connection).
-	 *
-	 * ```
-	 * var jim = client.getEndpoint({ id: 'jim' });
-	 * ```
-	 *
-	 * @constructor
-	 * @class respoke.Endpoint
-	 * @augments respoke.EventEmitter
-	 * @param {object} params
-	 * @param {string} params.id
-	 * @param {string} params.instanceId
-	 * @param {respoke.client.resolvePresence} [params.resolvePresence] An optional function for resolving presence
-	 * for an endpoint.
-	 * @returns {respoke.Endpoint}
-	 */
-	module.exports = function (params) {
-	    "use strict";
-	    params = params || {};
-	    /**
-	     * @memberof! respoke.Endpoint
-	     * @name instanceId
-	     * @private
-	     * @type {string}
-	     */
-	    var instanceId = params.instanceId;
-	    var that = respoke.EventEmitter(params);
-	    /**
-	     * @memberof! respoke.DirectConnection
-	     * @name client
-	     * @type {respoke.Client}
-	     * @private
-	     */
-	    var client = respoke.getClient(instanceId);
-	    /**
-	     * @memberof! respoke.DirectConnection
-	     * @name signalingChannel
-	     * @type {respoke.SignalingChannel}
-	     * @private
-	     */
-	    var signalingChannel = params.signalingChannel;
-	    /**
-	     * The number this endpoint's connections that are joined to groups. So if
-	     * an endpoint has 3 connections in the same group, the
-	     * `groupConnectionCount` for that endpoint would be 3.
-	     *
-	     * @memberof! respoke.DirectConnection
-	     * @name groupConnectionCount
-	     * @type {number}
-	     */
-	    that.groupConnectionCount = 0;
-
-	    var addCall = params.addCall;
-
-	    delete that.signalingChannel;
-	    delete that.instanceId;
-	    delete that.connectionId;
-	    delete that.addCall;
-	    /**
-	     * A name to identify the type of this object.
-	     * @memberof! respoke.Endpoint
-	     * @name className
-	     * @type {string}
-	     */
-	    that.className = 'respoke.Endpoint';
-	    /**
-	     * A direct connection to this endpoint. This can be used to send direct messages.
-	     * @memberof! respoke.Endpoint
-	     * @name directConnection
-	     * @type {respoke.DirectConnection}
-	     */
-	    that.directConnection = null;
-
-	    /**
-	     * Array of connections for this endpoint.
-	     * @memberof! respoke.Endpoint
-	     * @name connections
-	     * @type {Array<respoke.Connection>}
-	     */
-	    that.connections = [];
-	    client.listen('disconnect', function disconnectHandler() {
-	        that.connections = [];
-	    });
-
-	    var resolveEndpointPresence = params.resolveEndpointPresence;
-	    delete that.resolveEndpointPresence;
-
-	    /**
-	     * Represents the presence status. Typically a string, but other types are supported.
-	     * Defaults to `'unavailable'`.
-	     *
-	     * **Do not modify this directly** - it won't update presence with Respoke. Presence must be updated
-	     * by the remote endpoint.
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @name presence
-	     * @type {string|number|object|Array}
-	     */
-	    that.presence = 'unavailable';
-
-	    /**
-	     * Deprecated: use endpoint.presence instead.
-	     *
-	     * Return the presence.
-	     * @memberof! respoke.Endpoint
-	     * @deprecated
-	     * @name presence
-	     * @type {string|number|object|Array}
-	     */
-	    that.getPresence = function () {
-	        return that.presence;
-	    };
-
-	    /**
-	     * Internally set the presence on the object for this session upon receipt of a presence notification from
-	     * the backend. Respoke developers shouldn't use this.
-	     *
-	     * ```
-	     * client.setPresence({ presence: 'busy' });
-	     * ```
-	     *
-	     * While technically available on an Endpoint or Connection, this will not trigger
-	     * any API changes. The changes will only be reflected locally.
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.setPresence
-	     * @param {object} params
-	     * @param {string|number|object|Array} [params.presence=available]
-	     * @param {string} params.connectionId
-	     * @fires respoke.Endpoint#presence
-	     * @private
-	     */
-	    that.setPresence = function (params) {
-	        var connection;
-	        params = params || {};
-	        params.presence = params.presence || 'available';
-	        params.connectionId = params.connectionId || that.connectionId;
-
-	        if (!params.connectionId) {
-	            throw new Error("Can't set Endpoint presence without a connectionId.");
-	        }
-
-	        connection = that.getConnection({connectionId: params.connectionId}) || client.getConnection({
-	            connectionId: params.connectionId,
-	            skipCreate: false,
-	            endpointId: that.id
-	        });
-
-	        connection.presence = params.presence;
-	        that.resolvePresence();
-
-	        /**
-	         * This event indicates that the presence for this endpoint has been updated.
-	         * @event respoke.Endpoint#presence
-	         * @type {respoke.Event}
-	         * @property {string|number|object|Array} presence
-	         * @property {string} name - the event name.
-	         * @property {respoke.Endpoint} target
-	         */
-	        that.fire('presence', {
-	            presence: that.presence
-	        });
-	    };
-
-	    /**
-	     * Send a message to the endpoint through the infrastructure.
-	     *
-	     * ```
-	     * endpoint.sendMessage({
-	     *     message: "wassuuuuup"
-	     * });
-	     * ```
-	     *
-	     * **Using callbacks** will disable promises.
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.sendMessage
-	     * @param {object} params
-	     * @param {string} params.message
-	     * @param {string} [params.connectionId]
-	     * @param {boolean} [params.ccSelf=true] Copy this client's own endpoint on this message so that they arrive
-	     * at other devices it might be logged into elsewhere.
-	     * @param {boolean} [params.push=false] Whether or not to consider the message for push notifications to mobile
-	     * devices.
-	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of this
-	     * method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this method
-	     * only.
-	     * @returns {Promise|undefined}
-	     */
-	    that.sendMessage = function (params) {
-	        var promise;
-	        var retVal;
-	        params = params || {};
-	        params.ccSelf = (typeof params.ccSelf === "boolean" ? params.ccSelf : true);
-
-	        promise = signalingChannel.sendMessage({
-	            ccSelf: params.ccSelf,
-	            connectionId: params.connectionId,
-	            message: params.message,
-	            push: !!params.push,
-	            recipient: that
-	        });
-
-	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
-	        return retVal;
-	    };
-
-	    /**
-	     * Create a new audio-only call.
-	     *
-	     *     endpoint.startAudioCall({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.startAudioCall
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
-	     * element with the remote
-	     * audio and/or video attached.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @returns {respoke.Call}
-	     */
-	    that.startAudioCall = function (params) {
-	        params = params || {};
-
-	        params.constraints = respoke.convertConstraints(params.constraints, [{
-	            video: false,
-	            audio: true,
-	            optional: [],
-	            mandatory: {}
-	        }]);
-
-	        return that.startCall(params);
-	    };
-
-	    /**
-	     * Create a new call with audio and video.
-	     *
-	     *     endpoint.startVideoCall({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.startVideoCall
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
-	     * element with the remote
-	     * audio and/or video attached.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @returns {respoke.Call}
-	     */
-	    that.startVideoCall = function (params) {
-	        params = params || {};
-
-	        params.constraints = respoke.convertConstraints(params.constraints, [{
-	            video: true,
-	            audio: true,
-	            optional: [],
-	            mandatory: {}
-	        }]);
-
-	        return that.startCall(params);
-	    };
-
-	    /**
-	     * The endpoint who calls `endpoint.startScreenShare` will be the one whose screen is shared. If you'd like to
-	     * implement this as a screenshare request in which the endpoint who starts the call is the watcher and
-	     * not the sharer, it is recommended that you use `endpoint.sendMessage` to send a control message to the user
-	     * whose screenshare is being requested so that user's app can call `endpoint.startScreenShare`.
-	     *
-	     * By default, the call will be one-way screen share only, with the recipient sending nothing. To turn it into
-	     * a bidirectional call with the recipient sending video and both parties sending audio, set `params.sendOnly`
-	     * to false.
-	     *
-	     * NOTE: At this time, screen sharing only works with Chrome and Firefox, and both require browser extensions to
-	     * access screen sharing features. Please see instructions at https://github.com/respoke/respoke-chrome-extension
-	     * and https://github.com/respoke/respoke-firefox-screen-sharing-extension.
-	     *
-	     *     endpoint.startScreenShare({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.startScreenShare
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
-	     * and the remote party has received the video.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {Array<RTCConstraints>} [params.constraints] - Additional media to add to the call.
-	     * @param {RTCConstraints} [params.screenConstraints] - Overrides for the screen media.
-	     * @param {boolean} [params.sendOnly=true] - Whether the call should be unidirectional.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @param {string} [params.source] - Pass in what type of mediaSource you want. If omitted, you'll have access
-	     * to both the screen and windows. In firefox, you'll have access to the screen only.
-	     * @returns {respoke.Call}
-	     */
-	    that.startScreenShare = function (params) {
-	        params = params || {};
-	        var hasAudio;
-	        var addAudio;
-	        params.target = 'screenshare';
-
-	        if (typeof params.caller !== 'boolean') {
-	            params.caller = true;
-	        }
-
-	        // true and undefined -> true
-	        // receiveOnly will be set in call.js by respoke.sdpHasSendOnly
-	        params.sendOnly = (params.caller && (params.sendOnly || (params.sendOnly === undefined)));
-	        addAudio = (!params.sendOnly && (!params.screenConstraints ||
-	            (params.screenConstraints && params.screenConstraints.audio)));
-
-	        if (params.caller) {
-	            params.constraints = respoke.convertConstraints(params.constraints);
-	            params.constraints.push(respoke.getScreenShareConstraints({
-	                constraints: params.screenConstraints
-	            }));
-	            delete params.screenConstraints;
-
-	            params.constraints.forEach(function (con) {
-	                if (con.audio) {
-	                    hasAudio = true;
-	                }
-	            });
-
-	            /* If they didn't override screensharing constraints and no constraints so far have included audio,
-	             * add audio to the call. If they overrode the default screensharing constraints, we'll assume they
-	             * know what they are doing and didn't want audio.
-	             */
-	            if (addAudio && !hasAudio) {
-	                params.constraints.push({
-	                    audio: true,
-	                    video: false
-	                });
-	            }
-	        }
-
-	        return that.startCall(params);
-	    };
-
-	    /**
-	     * Create a new call.
-	     *
-	     *     endpoint.startCall({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.startCall
-	     * @param {object} params
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
-	     * element with the remote
-	     * audio and/or video attached.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
-	     * This callback will be called when media is muted or unmuted.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
-	     * wants to perform an action between local media becoming available and calling approve().
-	     * @param {Array<RTCConstraints>} [params.constraints]
-	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
-	     * @param {boolean} [params.sendOnly] - whether or not we send media
-	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
-	     * all connections belonging to this endpoint.
-	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
-	     * video attached to it.
-	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
-	     * video attached to it.
-	     * @returns {respoke.Call}
-	     */
-	    that.startCall = function (params) {
-	        var call = null;
-	        params = params || {};
-
-	        params.constraints = respoke.convertConstraints(params.constraints, [{
-	            video: true,
-	            audio: true,
-	            mandatory: {},
-	            optional: []
-	        }]);
-
-	        // If they are requesting a screen share by constraints without having called startScreenShare
-	        if (params.target !== 'screenshare' && params.constraints[0] &&
-	                respoke.constraintsHasScreenShare(params.constraints[0])) {
-	            return that.startScreenShare(params);
-	        }
-
-	        params.target = params.target || "call";
-
-	        log.debug('Endpoint.call', params);
-	        client.verifyConnected();
-	        if (typeof params.caller !== 'boolean') {
-	            params.caller = true;
-	        }
-
-	        if (!that.id) {
-	            log.error("Can't start a call without endpoint ID!");
-	            return;
-	        }
-
-	        params.instanceId = instanceId;
-	        params.remoteEndpoint = that;
-
-	        params.signalOffer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'offer';
-	            signalParams.target = params.target;
-	            signalParams.recipient = that;
-
-	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
-	        };
-	        params.signalAnswer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'answer';
-	            signalParams.target = params.target;
-	            signalParams.recipient = that;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
-	                signalParams.call.hangup({signal: false});
-	            });
-	        };
-	        params.signalConnected = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.connectionId = signalParams.call.connectionId;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalParams.recipient = that;
-	            signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
-	                signalParams.call.hangup();
-	            });
-	        };
-	        params.signalModify = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.recipient = that;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalingChannel.sendModify(signalParams).done();
-	        };
-	        params.signalCandidate = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.recipient = that;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            return signalingChannel.sendCandidate(signalParams);
-	        };
-	        params.signalHangup = function (signalParams) {
-	            signalParams.target = params.target;
-	            signalParams.recipient = that;
-	            signalParams.sessionId = signalParams.call.sessionId;
-	            signalingChannel.sendHangup(signalParams).done();
-	        };
-	        params.signalReport = function (signalParams) {
-	            log.debug("Sending debug report", signalParams.report);
-	            signalingChannel.sendReport(signalParams).done();
-	        };
-
-	        params.signalingChannel = signalingChannel;
-	        call = respoke.Call(params);
-	        addCall({call: call});
-	        return call;
-	    };
-
-	    /**
-	     * Create a new DirectConnection.  This method creates a new Call as well, attaching this DirectConnection to
-	     * it for the purposes of creating a peer-to-peer link for sending data such as messages to the other endpoint.
-	     * Information sent through a DirectConnection is not handled by the cloud infrastructure.  If there is already
-	     * a direct connection open, this method will resolve the promise with that direct connection instead of
-	     * attempting to create a new one.
-	     *
-	     *     endpoint.startDirectConnection({
-	     *         onOpen: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.startDirectConnection
-	     * @param {object} params
-	     * @param {respoke.Call.directConnectionSuccessHandler} [params.onSuccess] - Success handler for this
-	     * invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @param {respoke.DirectConnection.onStart} [params.onStart] - A callback for when setup of the direct
-	     * connection begins. The direct connection will not be open yet.
-	     * @param {respoke.DirectConnection.onOpen} [params.onOpen] - A callback for receiving notification of when
-	     * the DirectConnection is open and ready to be used.
-	     * @param {respoke.DirectConnection.onError} [params.onError] - Callback for errors setting up the direct
-	     * connection.
-	     * @param {respoke.DirectConnection.onClose} [params.onClose] - A callback for receiving notification of
-	     * when the DirectConnection is closed and the two Endpoints are disconnected.
-	     * @param {respoke.DirectConnection.onAccept} [params.onAccept] - Callback for when the user accepts the
-	     * request for a direct connection and setup begins.
-	     * @param {respoke.DirectConnection.onMessage} [params.onMessage] - A callback for receiving messages sent
-	     * through the DirectConnection.
-	     * @param {string} [params.connectionId] - An optional connection ID to use for this connection. This allows
-	     * the connection to be made to a specific instance of an endpoint in the case that the same endpoint is logged
-	     * in from multiple locations.
-	     * @returns {Promise<respoke.DirectConnection>} The DirectConnection which can be used to send data and messages
-	     * directly to the other endpoint.
-	     */
-	    that.startDirectConnection = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
-	        var call;
-
-	        try {
-	            client.verifyConnected();
-	        } catch (err) {
-	            deferred.reject(err);
-	            return retVal;
-	        }
-
-	        if (that.directConnection || params.create === false) {
-	            deferred.resolve(that.directConnection);
-	            return retVal;
-	        }
-
-	        if (typeof params.caller !== 'boolean') {
-	            params.caller = true;
-	        }
-
-	        if (!that.id) {
-	            deferred.reject(new Error("Can't start a direct connection without endpoint ID!"));
-	            return retVal;
-	        }
-
-	        params.instanceId = instanceId;
-	        params.remoteEndpoint = that;
-
-	        params.signalOffer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.signalType = 'offer';
-	            signalParams.target = 'directConnection';
-	            signalParams.recipient = that;
-
-	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
-	        };
-	        params.signalConnected = function (signalParams) {
-	            signalParams.target = 'directConnection';
-	            signalParams.recipient = that;
-	            signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
-	                signalParams.call.hangup();
-	            });
-	        };
-	        params.signalAnswer = function (signalParams) {
-	            var onSuccess = signalParams.onSuccess;
-	            var onError = signalParams.onError;
-	            delete signalParams.onSuccess;
-	            delete signalParams.onError;
-
-	            signalParams.target = 'directConnection';
-	            signalParams.recipient = that;
-	            signalParams.signalType = 'answer';
-	            signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
-	                signalParams.call.hangup({signal: false});
-	            });
-	        };
-	        params.signalCandidate = function (signalParams) {
-	            signalParams.target = 'directConnection';
-	            signalParams.recipient = that;
-	            return signalingChannel.sendCandidate(signalParams);
-	        };
-	        params.signalHangup = function (signalParams) {
-	            signalParams.target = 'directConnection';
-	            signalParams.recipient = that;
-	            signalingChannel.sendHangup(signalParams).done();
-	        };
-	        params.signalReport = function (signalParams) {
-	            signalParams.report.target = 'directConnection';
-	            log.debug("Not sending report");
-	            log.debug(signalParams.report);
-	        };
-	        params.needDirectConnection = true;
-	        // Don't include audio in the offer SDP
-	        params.offerOptions = {
-	            mandatory: {
-	                OfferToReceiveAudio: false
-	            }
-	        };
-
-	        params.signalingChannel = signalingChannel;
-	        call = respoke.Call(params);
-	        addCall({call: call});
-	        call.listen('direct-connection', function directConnectionHandler(evt) {
-	            that.directConnection = evt.directConnection;
-	            if (params.caller !== true) {
-	                if (!client.hasListeners('direct-connection') &&
-	                        !client.hasListeners('direct-connection') &&
-	                        !call.hasListeners('direct-connection')) {
-	                    that.directConnection.reject();
-	                    deferred.reject(new Error("Got an incoming direct connection with no handlers to accept it!"));
-	                    return;
-	                }
-
-	                deferred.resolve(that.directConnection);
-	                that.directConnection.listen('close', function closeHandler(evt) {
-	                    that.directConnection = undefined;
-	                }, true);
-	            }
-	        }, true);
-
-	        return retVal;
-	    };
-
-	    /**
-	     * Find the presence out of all known connections with the highest priority (most availability)
-	     * and set it as the endpoint's resolved presence.
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.resolvePresence
-	     * @private
-	     */
-	    that.resolvePresence = function () {
-
-	        var presenceList = that.connections.map(function (connection) {
-	            return connection.presence;
-	        });
-
-	        if (resolveEndpointPresence !== undefined) {
-	            that.presence = resolveEndpointPresence(presenceList);
-	        } else {
-	            var options = ['chat', 'available', 'away', 'dnd', 'xa', 'unavailable'];
-	            var idList;
-
-	            /*
-	             * Sort the connections array by the priority of the value of the presence of that
-	             * connectionId. This will cause the first element in the list to be the id of the
-	             * session with the highest priority presence so we can access it by the 0 index.
-	             * TODO: If we don't really care about the sorting and only about the highest priority
-	             * we could use Array.prototype.every to improve this algorithm.
-	             */
-	            idList = that.connections.sort(function sorter(a, b) {
-	                var indexA = options.indexOf(a.presence);
-	                var indexB = options.indexOf(b.presence);
-	                // Move it to the end of the list if it isn't one of our accepted presence values
-	                indexA = indexA === -1 ? 1000 : indexA;
-	                indexB = indexB === -1 ? 1000 : indexB;
-	                return indexA < indexB ? -1 : (indexB < indexA ? 1 : 0);
-	            });
-
-	            if (idList[0]) {
-	                that.presence = idList[0].presence;
-	            } else {
-	                that.presence = 'unavailable';
-	            }
-	        }
-	    };
-
-	    /**
-	     * Get the Connection with the specified id. The connection ID is optional if only one connection exists.
-	     *
-	     *     var connection = endpoint.getConnection({
-	     *         connectionId: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX"
-	     *     });
-	     *
-	     * @memberof! respoke.Endpoint
-	     * @method respoke.Endpoint.getConnection
-	     * @private
-	     * @param {object} params
-	     * @param {string} [params.connectionId]
-	     * @return {respoke.Connection}
-	     */
-	    that.getConnection = function (params) {
-	        var connection = null;
-	        params = params || {};
-	        if (that.connections.length === 1 &&
-	                (!params.connectionId || that.connections[0] === params.connectionId)) {
-	            return that.connections[0];
-	        }
-
-	        if (!params || !params.connectionId) {
-	            throw new Error("Can't find a connection without the connectionId.");
-	        }
-
-	        that.connections.every(function eachConnection(conn) {
-	            if (conn.id === params.connectionId) {
-	                connection = conn;
-	                return false;
-	            }
-	            return true;
-	        });
-
-	        return connection;
-	    };
-
-	    /**
-	     * Called to indicate that a connection for this endpoint has joined a
-	     * group.
-	     *
-	     * @private
-	     * @returns {number} Number of groups this endpoint is a member of.
-	     */
-	    that.joinedGroup = function () {
-	        ++that.groupConnectionCount;
-	    };
-
-	    /**
-	     * Called to indicate that a connection for this endpoint has left a
-	     * group.
-	     *
-	     * @private
-	     * @returns {number} Number of groups this endpoint is a member of.
-	     */
-	    that.leftGroup = function () {
-	        --that.groupConnectionCount;
-	    };
-
-	    return that;
-	}; // End respoke.Endpoint
-	/**
-	 * Handle messages sent to the logged-in user from this one Endpoint.  This callback is called every time
-	 * respoke.Endpoint#message fires.
-	 * @callback respoke.Endpoint.onMessage
-	 * @param {respoke.Event} evt
-	 * @param {respoke.TextMessage} evt.message - the message
-	 * @param {respoke.Endpoint} evt.target
-	 * @param {string} evt.name - the event name
-	 */
-	/**
-	 * Handle presence notifications from this one Endpoint.  This callback is called every time
-	 * respoke.Endpoint#message fires.
-	 * @callback respoke.Endpoint.onPresence
-	 * @param {respoke.Event} evt
-	 * @param {string|number|object|Array} evt.presence - the Endpoint's presence
-	 * @param {respoke.Endpoint} evt.target
-	 * @param {string} evt.name - the event name
-	 */
-	 /**
-	 * Handle resolving presence for this endpoint
-	 * @callback respoke.Client.resolveEndpointPresence
-	 * @param {Array<object>} connectionPresence
-	 * @returns {object|string|number}
-	 */
-
-
-/***/ },
-/* 10 */
-/***/ function(module, exports) {
-
-	/*
-	 * Copyright 2015, Digium, Inc.
-	 * All rights reserved.
-	 *
-	 * This source code is licensed under The MIT License found in the
-	 * LICENSE file in the root directory of this source tree.
-	 *
-	 * For all details and documentation:  https://www.respoke.io
-	 */
-
-	/**
-	 * A text message and the information needed to route it.
-	 * @class respoke.TextMessage
-	 * @constructor
-	 * @param {object} params
-	 * @param {string} [params.endpointId] - If sending, endpoint ID of the thing we're sending a message to.
-	 * @param {string} [params.cSelf] - Copy this client's own endpoint on this message so that they arrive
-	 * at other devices it might be logged into elsewhere.
-	 * @param {string} [params.connectionId] - If sending, connection ID of the thing we're sending a message to.
-	 * @param {string} [params.message] - If sending, a message to send
-	 * @param {object} [params.rawMessage] - If receiving, the parsed JSON we got from the server
-	 * @private
-	 * @returns {respoke.TextMessage}
-	 */
-	module.exports = function (params) {
-	    "use strict";
-	    params = params || {};
-	    var that = {};
-
-	    /**
-	     * Parse rawMessage and set attributes required for message delivery.
-	     * @memberof! respoke.TextMessage
-	     * @method respoke.TextMessage.parse
-	     * @private
-	     */
-	    function parse() {
-	        if (params.rawMessage) {
-	            try {
-	                that.endpointId = params.rawMessage.header.from;
-	                that.originalRecipient = params.rawMessage.header.toOriginal;
-	                that.connectionId = params.rawMessage.header.fromConnection;
-	                that.timestamp = params.rawMessage.header.timestamp;
-	            } catch (e) {
-	                throw new Error(e);
-	            }
-	            that.message = params.rawMessage.message || params.rawMessage.body;
-	            if (params.rawMessage.header.channel) {
-	                that.recipient = params.rawMessage.header.channel;
-	            }
-	        } else {
-	            try {
-	                that.to = params.endpointId;
-	                that.ccSelf = params.ccSelf;
-	                that.toConnection = params.connectionId;
-	                that.requestConnectionReply = (params.requestConnectionReply === true);
-	                that.push = (params.push === true);
-	            } catch (e) {
-	                throw new Error(e);
-	            }
-	            that.message = params.message;
-	        }
-	    }
-
-	    parse();
-	    return that;
-	}; // End respoke.TextMessage
-
-
-/***/ },
-/* 11 */
-/***/ function(module, exports) {
-
-	/*
-	 * Copyright 2015, Digium, Inc.
-	 * All rights reserved.
-	 *
-	 * This source code is licensed under The MIT License found in the
-	 * LICENSE file in the root directory of this source tree.
-	 *
-	 * For all details and documentation:  https://www.respoke.io
-	 */
-
-	/**
-	 * A signaling message and the information needed to route it.
-	 * @class respoke.SignalingMessage
-	 * @constructor
-	 * @param {object} params
-	 * @param {string} [params.fromEndpoint] - If sending, the endpoint ID of the recipient
-	 * @param {string} [params.fromConnection] - If sending, the connection ID of the recipient
-	 * @param {string} [params.connectionId] - The connectionId of the endpoint whose answer signal has been accepted.
-	 * @param {string} [params.signal] - If sending, a message to send
-	 * @param {respoke.Endpoint} [params.recipient]
-	 * @param {string} [params.signalType]
-	 * @param {string} [params.sessionId] - A globally unique ID to identify this call.
-	 * @param {string} [params.target] - Either 'call' or 'directConnection', TODO remove the need for this.
-	 * @param {string} [params.callerId] - Human readable caller ID. Not implemented.
-	 * @param {RTCSessionDescription} [params.sdp]
-	 * @param {Array<RTCIceCandidate>} [params.iceCandidates]
-	 * @param {object} [params.offering] - Object describing the media we're offering to send the remote party in a more
-	 * usable way than SDP. Not implemented.
-	 * @param {object} [params.requesting] - Object describing the media we're requesting from the remote party in a more
-	 * usable way than SDP. Not implemented.
-	 * @param {string} [params.reason] - Human readable reason for hanging up.
-	 * @param {string} [params.error] - String indicating that a previous signal was malformed or received in the wrong
-	 * state. Not implemented.
-	 * @param {string} [params.status] - "Ringing". Not implemented.
-	 * @param {object} [params.rawMessage] - If receiving, the parsed JSON we got from the server
-	 * @private
-	 * @returns {respoke.SignalingMessage}
-	 */
-	module.exports = function (params) {
-	    "use strict";
-	    params = params || {};
-	    var that = {};
-	    /**
-	     * Attributes without which we cannot build a signaling message.
-	     * @memberof! respoke.SignalingMessage
-	     * @name required
-	     * @private
-	     * @type {string}
-	     */
-	    var required = ['recipient', 'signalType', 'sessionId', 'target', 'signalId'];
-	    /**
-	     * Attributes which we will copy onto the signal if defined.
-	     * @memberof! respoke.SignalingMessage
-	     * @name required
-	     * @private
-	     * @type {string}
-	     */
-	    var allowed = [
-	        'signalType', 'sessionId', 'sessionDescription', 'iceCandidates', 'offering', 'target', 'signalId', 'callerId',
-	        'requesting', 'reason', 'error', 'status', 'connectionId', 'version', 'finalCandidates'
-	    ];
-
-	    params.version = '1.0';
-
-	    /**
-	     * Parse rawMessage and set attributes required for message delivery.
-	     * @memberof! respoke.SignalingMessage
-	     * @method respoke.SignalingMessage.parse
-	     * @private
-	     */
-	    function parse() {
-	        if (params.rawMessage) {
-	            try {
-	                that = JSON.parse(params.rawMessage.body); // Incoming message
-	            } catch (e) {
-	                that = params.rawMessage.body;
-	            }
-	            that.fromType = params.rawMessage.header.fromType;
-	            that.fromEndpoint = params.rawMessage.header.from;
-	            that.fromConnection = params.rawMessage.header.fromConnection;
-	            that.timestamp = params.rawMessage.header.timestamp;
-
-	            if (!that.target) {
-	                that.target = 'call';
-	            }
-	        } else {
-	            required.forEach(function eachAttr(attr) {
-	                if (params[attr] === 0 || !params[attr]) {
-	                    throw new Error("Can't build a signaling without " + attr);
-	                }
-	            });
-
-	            allowed.forEach(function eachAttr(attr) {
-	                if (params[attr] === 0 || params[attr]) {
-	                    that[attr] = params[attr];
-	                }
-	            });
-	        }
-	    }
-
-	    parse();
-	    return that;
-	}; // End respoke.SignalingMessage
-
-
-/***/ },
-/* 12 */
-/***/ function(module, exports, __webpack_require__) {
-
-	/*
-	 * Copyright 2015, Digium, Inc.
-	 * All rights reserved.
-	 *
-	 * This source code is licensed under The MIT License found in the
-	 * LICENSE file in the root directory of this source tree.
-	 *
-	 * For all details and documentation:  https://www.respoke.io
-	 */
-
-	var Q = __webpack_require__(6);
-	var respoke = __webpack_require__(1);
-
-	/**
-	 * A `respoke.Group` represents a collection of endpoints.
-	 *
-	 * There are methods to communicate with the endpoints at the group level and track
-	 * their presence in the group.
-	 *
-	 * @class respoke.Group
-	 * @augments respoke.EventEmitter
-	 * @constructor
-	 * @param {object} params
-	 * @param {string} params.instanceId
-	 * @param {respoke.Group.onJoin} params.onJoin - A callback to receive notifications every time a new
-	 * endpoint has joined the group. This callback does not get called when the client joins the group.
-	 * @param {respoke.Group.onMessage} params.onMessage - A callback to receive messages sent to the group from
-	 * remote endpoints.
-	 * @param {respoke.Group.onLeave} params.onLeave - A callback to receive notifications every time a new
-	 * endpoint has left the group. This callback does not get called when the client leaves the group.
-	 * @returns {respoke.Group}
-	 */
-	module.exports = function (params) {
-	    "use strict";
-	    params = params || {};
-
-	    var that = respoke.EventEmitter(params);
-	    /**
-	     * @memberof! respoke.Group
-	     * @name instanceId
-	     * @private
-	     * @type {string}
-	     */
-	    var instanceId = params.instanceId;
-	    var client = respoke.getClient(instanceId);
-
-	    if (!that.id) {
-	        throw new Error("Can't create a group without an ID.");
-	    }
-
-	    /**
-	     * Indicates whether there have been group membership changes since the last time we performed
-	     * a network request to list group members.
-	     * @memberof! respoke.Group
-	     * @name cacheIsValid
-	     * @private
-	     * @type {boolean}
-	     */
-	    var cacheIsValid = false;
-
-	    /**
-	     * Internal reference to the api signaling channel.
-	     * @memberof! respoke.Group
-	     * @name signalingChannel
-	     * @type respoke.SignalingChannel
-	     * @private
-	     */
-	    var signalingChannel = params.signalingChannel;
-	    delete params.signalingChannel;
-
-	    /**
-	     * The connections to members of this group.
-	     * @memberof! respoke.Group
-	     * @name endpoints
-	     * @type {array<respoke.Connection>}
-	     */
-	    that.connections = [];
-	    /**
-	     * A name to identify the type of this object.
-	     * @memberof! respoke.Group
-	     * @name className
-	     * @type {string}
-	     */
-	    that.className = 'respoke.Group';
-	    that.listen('join', params.onJoin);
-	    /**
-	     * Indicates that a message has been sent to this group.
-	     * @event respoke.Group#message
-	     * @type {respoke.Event}
-	     * @property {respoke.TextMessage} message
-	     * @property {string} name - The event name.
-	     * @property {respoke.Group} target
-	     */
-	    that.listen('message', params.onMessage);
-	    that.listen('leave', params.onLeave);
-
-	    /**
-	     * Clear out the connections within this group. Called when we're no longer
-	     * connected to the group.
-	     * @private
-	     */
-	    function clearConnections() {
-	        that.connections.forEach(function (connection) {
-	            connection.getEndpoint().leftGroup();
-	        });
-	        that.connections = [];
-	    }
-
-	    client.listen('disconnect', function disconnectHandler() {
-	        cacheIsValid = false;
-	        clearConnections();
-	    }, true);
-
-	    delete that.instanceId;
-	    delete that.onMessage;
-	    delete that.onPresence;
-	    delete that.onJoin;
-	    delete that.onLeave;
-
-	    /**
-	     * Join this group.
-	     *
-	     *     group.join().done(function () {
-	     *         group.sendMessage({
-	     *             message: "Hey, ppl! I'm here!"
-	     *         });
-	     *     }, function (err) {
-	     *         // Couldn't join the group, possibly permissions error
-	     *     });
-	     *
-	     * **Using callbacks** will disable promises.
-	     *
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.join
-	     * @return {Promise|undefined}
-	     * @param {object} params
-	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of
-	     * this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @fires respoke.Client#join
-	     */
-	    that.join = function () {
-	        var params = {
-	            id: that.id
-	        };
-	        var promise;
-	        var deferred;
-	        var retVal;
-	        cacheIsValid = false;
-
-	        try {
-	            validateConnection();
-	        } catch (err) {
-	            deferred = Q.defer();
-	            retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
-	            deferred.reject(err);
-	            return retVal;
-	        }
-
-	        promise = client.join(params);
-	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
-	        return retVal;
-	    };
-
-	    /**
-	     * Leave this group. If this method is called multiple times synchronously, it will batch requests and
-	     * only make one API call to Respoke.
-	     *
-	     *     group.leave({
-	     *         onSuccess: function () {
-	     *             // good riddance
-	     *         },
-	     *         onError: function (err) {
-	     *             // Couldn't leave the group, possibly a permissions error
-	     *         }
-	     *     });
-	     *
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.leave
-	     * @param {object} params
-	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of
-	     * this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @return {Promise|undefined}
-	     * @fires respoke.Client#leave
-	     */
-	    that.leave = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
-
-	        try {
-	            validateConnection();
-	            validateMembership();
-	        } catch (err) {
-	            deferred.reject(err);
-	            return retVal;
-	        }
-
-	        signalingChannel.leaveGroup({
-	            groupList: [that.id]
-	        }).done(function successHandler() {
-	            clearConnections();
-	            deferred.resolve();
-	            cacheIsValid = false;
-
-	            /**
-	             * This event is fired when the client leaves a group.
-	             * @event respoke.Client#leave
-	             * @type {respoke.Event}
-	             * @property {respoke.Group} group
-	             * @property {string} name - the event name.
-	             * @property {respoke.Client} target
-	             * @private
-	             */
-	            client.fire('leave', {
-	                group: that
-	            });
-	        }, function errorHandler(err) {
-	            deferred.reject();
-	        });
-	        return retVal;
-	    };
-
-	    /**
-	     * Remove a Connection from a Group. This does not change the status of the remote Endpoint, it only changes the
-	     * internal representation of the Group membership. This method should only be used internally.
-	     * @private
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.removeMember
-	     * @param {object} params
-	     * @param {string} [params.connectionId] - Endpoint's connection id
-	     * @fires respoke.Group#leave
-	     */
-	    that.removeMember = function (params) {
-	        params = params || {};
-
-	        try {
-	            validateConnection();
-	            validateMembership();
-	        } catch (err) {
-	            return;
-	        }
-
-	        if (!params.connectionId) {
-	            throw new Error("Can't remove a member to the group without it's Connection id.");
-	        }
-
-	        cacheIsValid = false;
-
-	        that.connections.every(function eachConnection(conn, index) {
-	            if (conn.id === params.connectionId) {
-	                that.connections.splice(index, 1);
-	                conn.getEndpoint().leftGroup();
-
-	                /**
-	                 * This event is fired when a member leaves a group the client is a member of.
-	                 * @event respoke.Group#leave
-	                 * @type {respoke.Event}
-	                 * @property {respoke.Connection} connection - The connection that left the group.
-	                 * @property {string} name - The event name.
-	                 * @property {respoke.Group} target
-	                 */
-	                that.fire('leave', {
-	                    connection: conn
-	                });
-	                return false;
-	            }
-	            return true;
-	        });
-	    };
-
-	    /**
-	     * Return true if the logged-in user is a member of this group and false if not.
-	     *
-	     *     if (group.isJoined()) {
-	     *         // I'm a member!
-	     *     } else {
-	     *         // Maybe join here
-	     *     }
-	     *
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.isJoined
-	     * @returns {boolean}
-	     */
-	    that.isJoined = function () {
-	        // connections array contains some connections and ours is among them.
-	        return (that.connections.length > 0 && !that.connections.every(function (conn) {
-	            return conn.id !== client.connectionId;
-	        }));
-	    };
-
-	    /**
-	     * Add a Connection to a group. This does not change the status of the remote Endpoint, it only changes the
-	     * internal representation of the Group membership. This method should only be used internally.
-	     * @memberof! respoke.Group
-	     * @private
-	     * @method respoke.Group.addMember
-	     * @param {object} params
-	     * @param {respoke.Connection} params.connection
-	     * @fires respoke.Group#join
-	     */
-	    that.addMember = function (params) {
-	        params = params || {};
-	        var absent;
-
-	        validateConnection();
-
-	        if (!params.connection) {
-	            throw new Error("Can't add a member to the group without it's Connection object.");
-	        }
-
-	        cacheIsValid = false;
-
-	        absent = that.connections.every(function eachConnection(conn) {
-	            return (conn.id !== params.connection.id);
-	        });
-
-	        if (absent) {
-	            that.connections.push(params.connection);
-	            params.connection.getEndpoint().joinedGroup();
-	            if (params.skipEvent) {
-	                return;
-	            }
-
-	            /**
-	             * This event is fired when a member joins a Group that the currently logged-in endpoint is a member
-	             * of.
-	             * @event respoke.Group#join
-	             * @type {respoke.Event}
-	             * @property {respoke.Connection} connection - The connection that joined the group.
-	             * @property {string} name - The event name.
-	             * @property {respoke.Group} target
-	             */
-	            that.fire('join', {
-	                connection: params.connection
-	            });
-	        }
-	    };
-
-	    /**
-	     * Validate that the client is connected to the Respoke infrastructure.
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.validateConnection
-	     * @private
-	     */
-	    function validateConnection() {
-	        if (!signalingChannel || !signalingChannel.isConnected()) {
-	            throw new Error("Can't complete request when not connected. Please reconnect!");
-	        }
-	    }
-
-	    /**
-	     * Validate that the client is a member of this group.
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.validateMembership
-	     * @private
-	     */
-	    function validateMembership() {
-	        if (!that.isJoined()) {
-	            throw new Error("Not a member of this group anymore.");
-	        }
-	    }
-
-	    /**
-	     *
-	     * Send a message to all of the endpoints in the group.
-	     *
-	     *      var group = client.getGroup({ id: 'js-enthusiasts'});
-	     *
-	     *      group.sendMessage({
-	     *          message: "Cat on keyboard",
-	     *          onSuccess: function (evt) {
-	     *              console.log('Message was sent');
-	     *          }
-	     *      });
-	     *
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.sendMessage
-	     * @param {object} params
-	     * @param {string} params.message - The message.
-	     * @param {boolean} [params.push=false] - Whether or not the message should be considered for push notifications to
-	     * mobile devices.
-	     * @param {function} params.onSuccess - Success handler indicating that the message was delivered.
-	     * @param {function} params.onError - Error handler indicating that the message was not delivered.
-	     * @returns {Promise|undefined}
-	     */
-	    that.sendMessage = function (params) {
-	        params = params || {};
-	        params.id = that.id;
-	        var promise;
-
-	        try {
-	            validateConnection();
-	            validateMembership();
-	        } catch (err) {
-	            promise = Q.reject(err);
-	        }
-
-	        return respoke.handlePromise(promise ? promise : signalingChannel.publish(params),
-	                params.onSuccess, params.onError);
-	    };
-
-	    /**
-	     * Get group members
-	     *
-	     * Get an array containing all connections subscribed to the group. Accepts onSuccess or onError parameters,
-	     * or it returns a promise that you can observe. An endpoint may have more than one connection subscribed to
-		 * a group, so if you're interested in unique endpoints, you may want to filter the connections by endpointId.
-	     *
-	     *     group.getMembers({
-	     *         onSuccess: function (connections) {
-	     *             connections.forEach(function (connection) {
-	     *                 console.log(connection.endpointId);
-	     *             });
-	     *         }
-	     *     });
-	     *
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.getMembers
-	     * @param {object} params
-	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Success handler for this invocation of this method only.
-	     * @returns {Promise<Array>} A promise to an array of Connections.
-	     */
-	    that.getMembers = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
-
-	        try {
-	            validateConnection();
-	            validateMembership();
-	        } catch (err) {
-	            deferred.reject(err);
-	            return retVal;
-	        }
-
-	        if (that.connections.length > 0 && cacheIsValid) {
-	            deferred.resolve(that.connections);
-	            return retVal;
-	        }
-
-	        signalingChannel.getGroupMembers({
-	            id: that.id
-	        }).done(function successHandler(list) {
-	            var endpointList = [];
-	            list.forEach(function eachMember(params) {
-	                var connection = client.getConnection({
-	                    endpointId: params.endpointId,
-	                    connectionId: params.connectionId,
-	                    skipCreate: true
-	                });
-
-	                if (!connection) {
-	                    // Create the connection
-	                    connection = client.getConnection({
-	                        endpointId: params.endpointId,
-	                        connectionId: params.connectionId
-	                    });
-	                }
-
-	                if (endpointList.indexOf(params.endpointId) === -1) {
-	                    endpointList.push(params.endpointId);
-	                }
-	                that.addMember({
-	                    connection: connection,
-	                    skipEvent: true
-	                });
-	            });
-
-	            cacheIsValid = true;
-
-	            deferred.resolve(that.connections);
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-	        return retVal;
-	    };
-
-	    /**
-	     * Experimental. Create a new conference call. The ID will be the group name. Only members of this group will
-	     * be permitted to participate in the conference call.
-	     *
-	     *     group.joinConference({
-	     *         onConnect: function (evt) {}
-	     *     });
-	     *
-	     * @memberof! respoke.Group
-	     * @method respoke.Group.joinConference
-	     * @private
-	     * @param {object} params
-	     * @param {string|boolean} params.audio - Whether participant should send and receive audio. Boolean `true`
-	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
-	     * indicate send only and receive only respectively.
-	     * @param {string|boolean} params.video - Whether participant should send and receive audio. Boolean `true`
-	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
-	     * indicate send only and receive only respectively.
-	     * @param {boolean} params.mixAudio - Whether Respoke should mix all the audio streams together to save bandwidth
-	     * for this one participant.
-	     * @arg {respoke.Conference.onJoin} [params.onJoin] - Callback for when a participant joins the conference.
-	     * @arg {respoke.Conference.onLeave} [params.onLeave] - Callback for when a participant leaves the conference.
-	     * @arg {respoke.Conference.onMessage} [params.onMessage] - Callback for when a message is sent to the conference.
-	     * @param {respoke.Conference.onMute} [params.onMute] - Callback for when local or remote media is muted or unmuted.
-	     * @arg {respoke.Conference.onTopic} [params.onTopic] - Callback for the conference topic changes.
-	     * @arg {respoke.Conference.onPresenter} [params.onPresenter] - Callback for when the presenter changes.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
-	     * media renegotiation.
-	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
-	     * element with the local audio and/or video attached.
-	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
-	     * and the remote party has received the video.
-	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
-	     * hung up.
-	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
-	     * browser has granted access to media.
-	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
-	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
-	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
-	     * the approval was automatic.
-	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
-	     * for the user to give permission to start getting audio or video.
-	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
-	     * information.
-	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
-	     * relay servers. If it cannot flow through relay servers, the call will fail.
-	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
-	     * required to flow peer-to-peer. If it cannot, the call will fail.
-	     * @returns {respoke.Conference}
-	     */
-	    that.joinConference = function (params) {
-	        var conference = null;
-	        params = params || {};
-	        params.id = that.id;
-
-	        conference = client.joinConference(params);
-	        return conference;
-	    };
-
-	    return that;
-	}; // End respoke.Group
-	/**
-	 * Receive notification that an endpoint has joined this group. This callback is called everytime
-	 * respoke.Group#join is fired.
-	 * @callback respoke.Group.onJoin
-	 * @param {respoke.Event} evt
-	 * @param {respoke.Connection} evt.connection
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Group} evt.target
-	 */
-	/**
-	 * Receive notification that an endpoint has left this group. This callback is called everytime
-	 * respoke.Group#leave is fired.
-	 * @callback respoke.Group.onLeave
-	 * @param {respoke.Event} evt
-	 * @param {respoke.Connection} evt.connection
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Group} evt.target
-	 */
-	/**
-	 * Receive notification that a message has been received to a group. This callback is called every time
-	 * respoke.Group#message is fired.
-	 * @callback respoke.Group.onMessage
-	 * @param {respoke.Event} evt
-	 * @param {respoke.TextMessage} evt.message
-	 * @param {string} evt.name - the event name.
-	 * @param {respoke.Group} evt.target
-	 */
-	/**
-	 * Get a list of the Connections which are members of this Group.
-	 * @callback respoke.Group.connectionsHandler
-	 * @param {Array<respoke.Connection>} connections
-	 */
-
-
-/***/ },
-/* 13 */
-/***/ function(module, exports, __webpack_require__) {
-
-	/*
-	 * Copyright 2015, Digium, Inc.
-	 * All rights reserved.
-	 *
-	 * This source code is licensed under The MIT License found in the
-	 * LICENSE file in the root directory of this source tree.
-	 *
-	 * For all details and documentation:  https://www.respoke.io
-	 */
-	'use strict';
-
-	var Q = __webpack_require__(6);
-	var io = __webpack_require__(14);
-	var respoke = __webpack_require__(1);
-	var template = __webpack_require__(16);
-	var log = respoke.log;
-
-	var sdkHeaderValue = 'Respoke.js/' + respoke.version;
-
-	var billingSuspensionErrorMessage = "Can't perform this action: Not Authorized. Your account is suspended due to a " +
-	    "billing issue. Please visit the Respoke Developer Portal (https://www.respoke.io) or contact customer support " +
-	    "(support@respoke.io) to address this issue.";
-
-	var suspensionErrorMessage = "Canot perform this action: Not Authorized. Your account is suspended. Please visit " +
-	    "the Respoke Developer Portal (https://www.respoke.io) or contact customer support (support@respoke.io) to " +
-	    "address this issue.";
-
-	/**
-	 * Returns a timestamp, measured in milliseconds.
-	 *
-	 * This method will use high resolution time, if available. Otherwise it falls back to just
-	 * using the wall clock.
-	 *
-	 * @return {number} Number of milliseconds that have passed since some point in the past.
-	 * @private
-	 */
-	var now;
-	if (window.performance && window.performance.now) {
-	    now = window.performance.now.bind(window.performance);
-	} else if (Date.now) {
-	    now = Date.now.bind(Date);
-	} else {
-	    now = function () {
-	        return new Date().getTime();
-	    };
-	}
-
-	/**
-	 * Container for holding requests that are currently waiting on responses.
-	 * @returns {PendingRequests}
-	 * @private
-	 * @constructor
-	 */
-	var PendingRequests = function () {
-	    /**
-	     * Pending requests.
-	     * @private
-	     * @type {Array}
-	     */
-	    var contents = [];
-	    /**
-	     * Counter to provide the next id.
-	     * @private
-	     * @type {number}
-	     */
-	    var counter = 0;
-	    var that = {};
-
-	    /**
-	     * Add a new pending request.
-	     *
-	     * @memberof PendingRequests
-	     * @param obj
-	     * @returns {*} The key to use for the `remove` method.
-	     */
-	    that.add = function (obj) {
-	        contents[counter] = obj;
-	        counter++;
-	        return counter;
-	    };
-
-	    /**
-	     * Remove a pending request.
-	     *
-	     * @param {*} key Key returned from `add` method.
-	     */
-	    that.remove = function (key) {
-	        delete contents[key];
-	    };
-
-	    /**
-	     * Disposes of any currently pending requests, synchronously invoking the provided function on
-	     * each.
-	     *
-	     * @param {function} [fn] Callback for pending requests.
-	     */
-	    that.reset = function (fn) {
-	        if (fn) {
-	            contents.forEach(fn);
-	        }
-	        contents = [];
-	    };
-
-	    return that;
-	};
-
-	/**
-	 * The purpose of this class is to make a method call for each API call
-	 * to the backend REST interface.  This class takes care of App authentication, websocket connection,
-	 * Endpoint authentication, and all App interactions thereafter.  Almost all methods return a Promise.
-	 * @class respoke.SignalingChannel
-	 * @constructor
-	 * @augments respoke.EventEmitter
-	 * @param {object} params
-	 * @param {string} params.instanceId - client id
-	 * @private
-	 * @returns {respoke.SignalingChannel}
-	 */
-	module.exports = function (params) {
-	    params = params || {};
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name instanceId
-	     * @private
-	     * @type {string}
-	     */
-	    var instanceId = params.instanceId;
-	    var that = respoke.EventEmitter(params);
-	    delete that.instanceId;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name className
-	     * @type {string}
-	     * @private
-	     */
-	    that.className = 'respoke.SignalingChannel';
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name client
-	     * @private
-	     * @type {respoke.Client}
-	     */
-	    var client = respoke.getClient(instanceId);
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name socket
-	     * @private
-	     * @type {Socket.io.Socket}
-	     */
-	    var socket = null;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name clientSettings
-	     * @private
-	     * @type {object}
-	     */
-	    var clientSettings = params.clientSettings;
-	    delete that.clientSettings;
-	    clientSettings.baseURL = clientSettings.baseURL || 'https://api.respoke.io';
-	    /**
-	     * A map to avoid duplicate endpoint presence registrations.
-	     * @memberof! respoke.SignalingChannel
-	     * @name presenceRegistered
-	     * @private
-	     * @type {object}
-	     */
-	    var presenceRegistered = {};
-	    /**
-	     * A reference to the private function Client.actuallyConnect that gets set in SignalingChannel.open() so we
-	     * don't have to make it public.
-	     * @memberof! respoke.SignalingChannel
-	     * @name actuallyConnect
-	     * @private
-	     * @type {function}
-	     */
-	    var actuallyConnect = null;
-	    /**
-	     * Set of promises for any pending requests on the WebSocket.
-	     * @private
-	     * @type {PendingRequests}
-	     */
-	    var pendingRequests = PendingRequests();
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name reconnectTimeout
-	     * @private
-	     * @type {number}
-	     */
-	    var reconnectTimeout = null;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name maxReconnectTimeout
-	     * @private
-	     * @type {number}
-	     */
-	    var maxReconnectTimeout = 5 * 60 * 1000;
-	    /**
-	     * Rejects a message if the body size is greater than this. It is enforced servcer side, so changing this
-	     * won't make the bodySizeLimit any bigger, this just gives you a senseable error if it's too big.
-	     * @memberof! respoke.signalingChannel
-	     * @name bodySizeLimit
-	     * @private
-	     * @type {number}
-	     */
-	    var bodySizeLimit = 20000;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name appId
-	     * @private
-	     * @type {string}
-	     */
-	    var appId = null;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name endpointId
-	     * @private
-	     * @type {string}
-	     */
-	    var endpointId = null;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name token
-	     * @private
-	     * @type {string}
-	     */
-	    var token = null;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name appToken
-	     * @private
-	     * @type {string}
-	     */
-	    var appToken = null;
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name xhr
-	     * @private
-	     * @type {XMLHttpRequest}
-	     */
-	    var xhr = new XMLHttpRequest();
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name routingMethods
-	     * @private
-	     * @type {object}
-	     * @desc The methods contained in this object are statically defined methods that are called by constructing
-	     * their names dynamically. 'do' + $className + $signalType == 'doCallOffer', et. al.
-	     */
-	    var routingMethods = {};
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name handlerQueue
-	     * @private
-	     * @type {object}
-	     */
-	    var handlerQueue = {
-	        'message': [],
-	        'signal': [],
-	        'presence': []
-	    };
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @name errors
-	     * @private
-	     * @type {object}
-	     */
-	    var errors = {
-	        400: "Can't perform this action: missing or invalid parameters.",
-	        401: "Can't perform this action: not authenticated.",
-	        403: "Can't perform this action: not authorized.",
-	        404: "Item not found.",
-	        409: "Can't perform this action: item in the wrong state.",
-	        429: "API rate limit was exceeded.",
-	        500: "Can't perform this action: server problem."
-	    };
-
-	    /**
-	     * Indicate whether the signaling channel has a valid connection to Respoke.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.isConnected
-	     * @return {boolean}
-	     */
-	    that.isConnected = function () {
-	        return !!(socket && socket.socket.connected);
-	    };
-
-	    /**
-	     * Indicate whether the signaling channel is currently waiting on a websocket to connect.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.isConnecting
-	     * @private
-	     * @return {boolean}
-	     */
-	    function isConnecting() {
-	        return !!(socket && socket.socket.connecting);
-	    }
-
-	    /**
-	     * Get the call debug preference.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.isSendingReport
-	     * @private
-	     * @return {boolean}
-	     */
-	    that.isSendingReport = function (params) {
-	        return clientSettings.enableCallDebugReport;
-	    };
-
-	    /**
-	     * Open a connection to the REST API and validate the app, creating a session token.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.open
-	     * @private
-	     * @param {object} params
-	     * @param {string} [params.token] - The Endpoint's auth token
-	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
-	     * endpoint. This is only used when `developmentMode` is set to `true`.
-	     * @return {Promise}
-	     */
-	    that.open = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        log.debug('SignalingChannel.open', params, clientSettings);
-	        token = params.token || token;
-	        actuallyConnect = typeof params.actuallyConnect === 'function' ? params.actuallyConnect : actuallyConnect;
-
-	        Q.fcall(function tokenPromise() {
-	            if (clientSettings.developmentMode === true && clientSettings.appId && params.endpointId) {
-	                return that.getToken({
-	                    appId: clientSettings.appId,
-	                    endpointId: params.endpointId
-	                });
-	            }
-	            return null;
-	        }).then(function successHandler(newToken) {
-	            token = newToken || token;
-	            return doOpen({token: token});
-	        }).done(function successHandler() {
-	            deferred.resolve();
-	            log.debug('client', client);
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Get a developer mode token for an endpoint. App must be in developer mode.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.getToken
-	     * @private
-	     * @param {object} params
-	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
-	     * endpoint. This is only used when `developmentMode` is set to `true`.
-	     * @return {Promise<String>}
-	     */
-	    that.getToken = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        log.debug('SignalingChannel.getToken', params);
-
-	        var callParams = {
-	            path: '/v1/tokens',
-	            httpMethod: 'POST',
-	            parameters: {
-	                appId: clientSettings.appId,
-	                endpointId: params.endpointId,
-	                ttl: 60 * 60 * 6
-	            }
-	        };
-
-	        call(callParams).done(function (response) {
-	            if (response.statusCode === 200 && response.body && response.body.tokenId) {
-	                token = response.body.tokenId;
-	                deferred.resolve(response.body.tokenId);
-	                return;
-	            }
-
-	            var errorMessage = "Couldn't get a developer mode token. ";
-	            if (isBillingSuspensionUnauthorizedResponse(response)) {
-	                errorMessage += billingSuspensionErrorMessage;
-	            } else if (isSuspensionUnauthorizedResponse(response)) {
-	                errorMessage += suspensionErrorMessage;
-	            } else {
-	                errorMessage += response.error;
-	            }
-
-	            deferred.reject(buildResponseError(response, errorMessage));
-	        }, function (err) {
-	            deferred.reject(new Error("Couldn't get a developer mode token. " + err.message));
-	        });
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Open a connection to the REST API and validate the app, creating a session token.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.doOpen
-	     * @param {object} params
-	     * @param {string} params.token - The Endpoint's auth token
-	     * @return {Promise}
-	     * @private
-	     */
-	    function doOpen(params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        log.debug('SignalingChannel.doOpen', params);
-
-	        if (!params.token) {
-	            deferred.reject(new Error("Can't open connection to Respoke without a token."));
-	            return deferred.promise;
-	        }
-
-	        call({
-	            path: '/v1/session-tokens',
-	            httpMethod: 'POST',
-	            parameters: {
-	                tokenId: params.token
-	            }
-	        }).done(function (response) {
-	            if (response.statusCode === 200) {
-	                appToken = response.body.token;
-	                deferred.resolve();
-	                log.debug("Signaling connection open to", clientSettings.baseURL);
-	                return;
-	            }
-
-	            var errorMessage = "Couldn't authenticate app. ";
-	            if (isBillingSuspensionUnauthorizedResponse(response)) {
-	                errorMessage += billingSuspensionErrorMessage;
-	            } else if (isSuspensionUnauthorizedResponse(response)) {
-	                errorMessage += suspensionErrorMessage;
-	            } else {
-	                errorMessage += response.error;
-	            }
-
-	            deferred.reject(buildResponseError(response, errorMessage));
-	        }, function (err) {
-	            log.error("Network call failed:", err.message);
-	            deferred.reject(new Error("Couldn't authenticate app. " + err.message));
-	        });
-
-	        return deferred.promise;
-	    }
-
-	    /**
-	     * Close a connection to the REST API. Invalidate the session token.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.close
-	     * @private
-	     * @return {Promise}
-	     */
-	    that.close = function () {
-	        var deferred = Q.defer();
-
-	        wsCall({
-	            path: '/v1/connections/{id}/',
-	            httpMethod: 'DELETE',
-	            urlParams: {
-	                id: client.endpointId
-	            }
-	        }).fin(function finallyHandler() {
-	            return call({
-	                path: '/v1/session-tokens',
-	                httpMethod: 'DELETE'
-	            });
-	        }).fin(function finallyHandler() {
-	            if (socket) {
-	                socket.removeAllListeners();
-	                socket.disconnect();
-	            }
-	            socket = null;
-	            deferred.resolve();
-	        }).done();
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Generate and send a presence message representing the client's current status. This triggers
-	     * the server to send the client's endpoint's presence.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendPresence
-	     * @private
-	     * @param {object} params
-	     * @param {string|number|object|Array} [params.presence=available]
-	     * @param {string} [params.status] - Non-enumeration human-readable status.
-	     * @param {string} [params.show] - I can't remember what this is.
-	     * @returns {Promise}
-	     */
-	    that.sendPresence = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        log.debug("Signaling sendPresence");
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            path: '/v1/presence',
-	            httpMethod: 'POST',
-	            parameters: {
-	                'presence': {
-	                    show: params.show,
-	                    'status': params.status,
-	                    type: params.presence || "available"
-	                }
-	            }
-	        }).done(function successHandler() {
-	            deferred.resolve();
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * If the logged-in endpoint has permission through its Respoke role, forcibly remove another participant
-	     * from the conference, ending its conference call.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.removeConferenceParticipant
-	     * @private
-	     * @param {object} params
-	     * @param {string} [endpointId] - The endpoint id of the endpoint to be removed
-	     * @param {string} [connectionId] - The connection id of the connection to be removed
-	     * @returns {Promise}
-	     */
-	    that.removeConferenceParticipant = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var endpointId = params.endpointId;
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        if (!endpointId && params.connectionId) {
-	            try {
-	                endpointId = client.getConnection({
-	                    connectionId: params.connectionId
-	                }).getEndpoint().id;
-	            } catch (err) {}
-
-	            if (!endpointId) {
-	                deferred.reject(new Error("conference.removeParticipant can't figure out what endpoint to remove!"));
-	                return deferred.promise;
-	            }
-	        }
-
-	        wsCall({
-	            httpMethod: 'DELETE',
-	            path: '/v1/conferences/{id}/participants/{endpointId}',
-	            urlParams: {
-	                id: params.conferenceId,
-	                endpointId: endpointId
-	            },
-	            parameters: {
-	                connectionId: params.connectionId // Optional; It's OK if it's undefined here.
-	            }
-	        }).then(function successHandler() {
-	            deferred.resolve();
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * If the logged-in endpoint has permission through its Respoke role, close down the conference, removing all
-	     * participants.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.destroyConference
-	     * @param {object} params
-	     * @param {string} params.id
-	     * @private
-	     * @returns {Promise}
-	     */
-	    that.destroyConference = function (params) {
-	        var deferred = Q.defer();
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            httpMethod: 'DELETE',
-	            path: '/v1/conferences/{id}/',
-	            urlParams: { id: params.conferenceId }
-	        }).then(function successHandler() {
-	            deferred.resolve();
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Retrieve the list of participants in the specified conference.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.getConferenceParticipants
-	     * @private
-	     * @returns {Promise<respoke.Connection>}
-	     * @param {object} params
-	     * @param {string} params.id
-	     */
-	    that.getConferenceParticipants = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            httpMethod: 'GET',
-	            path: '/v1/conferences/{id}/participants/',
-	            urlParams: { id: params.id }
-	        }).then(function successHandler(participants) {
-	            deferred.resolve(participants.map(function (par) {
-	                return client.getConnection({
-	                    connectionId: par.connectionId,
-	                    endpointId: par.endpointId
-	                });
-	            }));
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Get or create a group in the infrastructure.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.getGroup
-	     * @private
-	     * @returns {Promise<respoke.Group>}
-	     * @param {object} params
-	     * @param {string} params.name
-	     */
-	    that.getGroup = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            httpMethod: 'POST',
-	            path: '/v1/channels/',
-	            parameters: {
-	                name: params.name
-	            }
-	        }).then(function successHandler(group) {
-	            deferred.resolve(group);
-	        }, function errorHandler(err) {
-	            // Group was already created, just return back the same params we were given.
-	            deferred.resolve({id: params.name});
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Leave a group. In order to aggregate subsequent repeated requests, this function, when called synchronously,
-	     * will continue to accumulate group ids until the next tick of the event loop, when the request will be
-	     * issued. The same instance of Promise is returned each time.
-	     * @memberof! respoke.SignalingChannel
-	     * @private
-	     * @method respoke.SignalingChannel.leaveGroup
-	     * @returns {Promise}
-	     * @param {object} params
-	     * @param {array} params.groupList
-	     */
-	    that.leaveGroup = (function () {
-	        var groups = {};
-	        var deferred = Q.defer();
-
-	        return function (params) {
-	            params = params || {};
-	            params.groupList = params.groupList || [];
-
-	            var toRun = (Object.keys(groups).length === 0);
-
-	            if (!that.isConnected()) {
-	                deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	                return deferred.promise;
-	            }
-
-	            params.groupList.forEach(function (id) {
-	                if (typeof id === 'string') {
-	                    groups[id] = true;
-	                }
-	            });
-
-	            if (!toRun) {
-	                return deferred.promise;
-	            }
-
-	            setTimeout(function () {
-	                // restart accumulation
-	                var groupList = Object.keys(groups);
-	                groups = {};
-	                var saveDeferred = deferred;
-	                deferred = Q.defer();
-
-	                if (groupList.length === 0) {
-	                    saveDeferred.resolve();
-	                    return;
-	                }
-
-	                wsCall({
-	                    path: '/v1/groups/',
-	                    parameters: {
-	                        groups: groupList
-	                    },
-	                    httpMethod: 'DELETE'
-	                }).done(function successHandler() {
-	                    saveDeferred.resolve();
-	                }, function errorHandler(err) {
-	                    saveDeferred.reject(err);
-	                });
-	            });
-	            return deferred.promise;
-	        };
-	    })();
-
-	    /**
-	     * Join a group. In order to aggregate subsequent repeated requests, this function, when called synchronously,
-	     * will continue to accumulate group ids until the next tick of the event loop, when the request will be
-	     * issued. The same instance of Promise is returned each time.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.joinGroup
-	     * @private
-	     * @returns {Promise}
-	     * @param {object} params
-	     * @param {array} params.groupList
-	     */
-	    that.joinGroup = (function () {
-	        var groups = {};
-	        var deferred = Q.defer();//i think this needs to go in actualJoinGroup
-
-	        return function actualJoinGroup(params) {
-	            params = params || {};
-	            params.groupList = params.groupList || [];
-
-	            log.trace('been asked to join groups', params.groupList);
-
-	            var needsToRun = (Object.keys(groups).length === 0);
-
-	            if (!that.isConnected()) {
-	                deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	                return deferred.promise;
-	            }
-
-	            params.groupList.forEach(function (id) {
-	                if (typeof id === 'string') {
-	                    log.trace('put group', id, 'in the join queue');
-	                    groups[id] = true;
-	                }
-	            });
-
-	            if (!needsToRun) {
-	                return deferred.promise;
-	            }
-
-	            setTimeout(function requestJoinsForGroupQueue() {
-	                // restart accumulation
-	                var groupList = Object.keys(groups);
-	                log.trace('list of groups to be requested', groupList);
-	                //reset the groups object
-	                groups = {};
-	                var saveDeferred = deferred;
-	                deferred = Q.defer();
-
-	                if (groupList.length === 0) {
-	                    log.trace('list of groups was empty so not sending queue');
-	                    saveDeferred.resolve();
-	                    return;
-	                }
-
-	                wsCall({
-	                    path: '/v1/groups/',
-	                    parameters: {
-	                        groups: groupList
-	                    },
-	                    httpMethod: 'POST'
-	                }).done(function successHandler() {
-	                    saveDeferred.resolve();
-	                }, function errorHandler(err) {
-	                    saveDeferred.reject(err);
-	                });
-	            });
-	            return deferred.promise;
-	        };
-	    })();
-
-	    /**
-	     * Publish a message to a group.
-	     * @memberof! respoke.SignalingChannel
-	     * @private
-	     * @method respoke.SignalingChannel.publish
-	     * @returns {Promise}
-	     * @param {object} params
-	     * @param {string} params.id
-	     * @param {string} params.message
-	     * @param {boolean} [params.push=false]
-	     */
-	    that.publish = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var message = respoke.TextMessage({
-	            endpointId: params.id,
-	            message: params.message,
-	            push: !!params.push
-	        });
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            path: '/v1/channels/{id}/publish/',
-	            urlParams: { id: params.id },
-	            httpMethod: 'POST',
-	            parameters: message
-	        }).done(function successHandler() {
-	            deferred.resolve();
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Register as an observer of presence for the specified endpoint ids. In order to aggregate subsequent repeated
-	     * requests, this function, when called synchronously, will continue to accumulate endpoint ids until the next
-	     * tick of the event loop, when the request will be issued. The same instance of Promise is returned each time.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.registerPresence
-	     * @private
-	     * @param {object} params
-	     * @param {Array<string>} params.endpointList
-	     * @returns {Promise}
-	     */
-	    that.registerPresence = (function () {
-	        var endpoints = {};
-	        var deferred = Q.defer();
-
-	        return function (params) {
-	            params = params || {};
-	            params.endpointList = params.endpointList || [];
-	            var toRun = (Object.keys(endpoints).length === 0);
-
-	            if (!that.isConnected()) {
-	                return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            }
-
-	            params.endpointList.forEach(function (ep) {
-	                if (typeof ep === 'string' && presenceRegistered[ep] !== true) {
-	                    endpoints[ep] = true;
-	                }
-	            });
-
-	            if (!toRun) {
-	                return deferred.promise;
-	            }
-
-	            setTimeout(function () {
-	                // restart accumulation
-	                var endpointList = Object.keys(endpoints);
-	                endpoints = {};
-	                var saveDeferred = deferred;
-	                deferred = Q.defer();
-
-	                if (endpointList.length === 0) {
-	                    saveDeferred.resolve();
-	                    return;
-	                }
-
-	                wsCall({
-	                    httpMethod: 'POST',
-	                    path: '/v1/presenceobservers',
-	                    parameters: {
-	                        endpointList: endpointList
-	                    }
-	                }).done(function successHandler() {
-	                    params.endpointList.forEach(function eachId(id) {
-	                        presenceRegistered[id] = true;
-	                    });
-	                    saveDeferred.resolve();
-	                }, function (err) {
-	                    saveDeferred.reject(err);
-	                });
-	                // We could even add a tiny delay like 10ms if we want to get more conservative and
-	                // catch asychronous calls to client.getEndpoint() and other methods which call
-	                // this method.
-	            });
-
-	            return deferred.promise;
-	        };
-	    })();
-
-	    /**
-	     * Join a group.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.getGroupMembers
-	     * @private
-	     * @returns {Promise<Array>}
-	     * @param {object} params
-	     * @param {string} params.id
-	     */
-	    that.getGroupMembers = function (params) {
-	        var deferred = Q.defer();
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        if (!params.id) {
-	            deferred.reject(new Error("Can't get group's endpoints without group ID."));
-	            return deferred.promise;
-	        }
-
-	        return wsCall({
-	            path: '/v1/channels/{id}/subscribers/',
-	            urlParams: { id: params.id },
-	            httpMethod: 'GET'
-	        });
-	    };
-
-	    /**
-	     * Send a chat message.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendMessage
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.SignalingMessage} params.message - The string text message to send.
-	     * @param {respoke.Endpoint} params.recipient
-	     * @param {string} [params.connectionId]
-	     * @param {boolean} [params.push=false]
-	     * @returns {Promise}
-	     */
-	    that.sendMessage = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var message = respoke.TextMessage({
-	            endpointId: params.recipient.id,
-	            ccSelf: params.ccSelf,
-	            connectionId: params.connectionId,
-	            message: params.message,
-	            push: !!params.push
-	        });
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            path: '/v1/messages',
-	            httpMethod: 'POST',
-	            parameters: message
-	        }).done(function successHandler() {
-	            deferred.resolve();
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Send an ACK signal to acknowlege reception of a signal.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendACK
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.SignalingMessage} params.signal
-	     * @return {Promise}
-	     */
-	    that.sendACK = function (params) {
-	        var endpoint;
-	        params = params || {};
-
-	        if (!that.isConnected()) {
-	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	        }
-
-	        if (!params.signal) {
-	            return Q.reject(new Error("Can't send ACK, no signal was given."));
-	        }
-
-	        endpoint = client.getEndpoint({
-	            id: params.signal.fromEndpoint,
-	            skipPresence: true
-	        });
-	        if (!endpoint) {
-	            return Q.reject(new Error("Can't send ACK, can't get endpoint."));
-	        }
-
-	        return that.sendSignal({
-	            recipient: endpoint,
-	            signalType: 'ack',
-	            signalId: params.signal.signalId,
-	            sessionId: params.signal.sessionId,
-	            target: params.signal.target,
-	            ackedSignalType: params.signal.signalType
-	        });
-	    };
-
-	    /**
-	     * Send a signaling message.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendSignal
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.Call} [params.call] - For getting the sessionId & connectionId. Not required for 'ack'.
-	     * @return {Promise}
-	     */
-	    that.sendSignal = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var signal;
-	        var to;
-	        var toConnection;
-	        var toType;
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        if (params.call) {
-	            params.sessionId = params.call.id;
-	            if (params.call.connectionId) { // the recipient's connectionId
-	                params.connectionId = params.call.connectionId;
-	            }
-	        }
-
-	        to = params.recipient.id;
-	        toConnection = params.connectionId;
-	        toType = params.toType || 'web';
-
-	        try {
-	            params.signalId = respoke.makeGUID();
-	            // This will strip off non-signaling attributes.
-	            signal = respoke.SignalingMessage(params);
-	        } catch (e) {
-	            deferred.reject(e);
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            path: '/v1/signaling',
-	            httpMethod: 'POST',
-	            parameters: {
-	                ccSelf: params.ccSelf,
-	                signal: JSON.stringify(signal),
-	                to: to,
-	                toConnection: toConnection,
-	                toType: toType
-	            }
-	        }).done(function successHandler() {
-	            deferred.resolve();
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Send an ICE candidate.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendCandidate
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.Endpoint} params.recipient - The recipient.
-	     * @param {string} [params.connectionId]
-	     * @param {Array<RTCIceCandidate>} params.iceCandidates - An array of ICE candidate.
-	     * @return {Promise}
-	     */
-	    that.sendCandidate = function (params) {
-	        params = params || {};
-	        params.signalType = 'iceCandidates';
-
-	        if (!that.isConnected()) {
-	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	        }
-
-	        if (typeof params.finalCandidates !== 'undefined') {
-	            log.debug('Sending final', params.iceCandidates.length, 'of', params.finalCandidates.length, 'ice candidates');
-	        } else {
-	            log.debug('Sending', params.iceCandidates.length, 'ice candidates');
-	        }
-
-	        return that.sendSignal(params);
-	    };
-
-	    /**
-	     * Send an SDP.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendSDP
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.Endpoint} params.recipient - The recipient.
-	     * @param {string} [params.connectionId]
-	     * @param {RTCSessionDescription} params.sessionDescription - An SDP to JSONify and send.
-	     * @return {Promise}
-	     */
-	    that.sendSDP = function (params) {
-	        params = params || {};
-
-	        if (!that.isConnected()) {
-	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	        }
-
-	        if (['offer', 'answer'].indexOf(params.signalType) === -1) {
-	            return Q.reject("Not an SDP type signal.");
-	        }
-
-	        return that.sendSignal(params);
-	    };
-
-	    /**
-	     * Send a call report to the cloud infrastructure.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendReport
-	     * @private
-	     * @param {object} params
-	     * @todo TODO document the params.
-	     * @return {Promise}
-	     */
-	    that.sendReport = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var message = {
-	            debugData: params
-	        };
-
-	        if (!clientSettings.enableCallDebugReport) {
-	            log.debug('not sending call debugs - disabled');
-	            deferred.resolve();
-	            return deferred.promise;
-	        }
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            path: '/v1/call-debugs',
-	            httpMethod: 'POST',
-	            parameters: message
-	        }).done(function () {
-	            deferred.resolve();
-	        }, function (err) {
-	            deferred.reject(err);
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Send a message hanging up the WebRTC session.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendHangup
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.Endpoint} params.recipient - The recipient.
-	     * @param {string} [params.connectionId]
-	     * @param {string} params.reason - The reason the session is being hung up.
-	     * @return {Promise}
-	     */
-	    that.sendHangup = function (params) {
-	        params = params || {};
-	        params.signalType = 'bye';
-	        params.ccSelf = true;
-
-	        if (!that.isConnected()) {
-	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	        }
-
-	        return that.sendSignal(params);
-	    };
-
-	    /**
-	     * Send a message to all connection ids indicating we have negotiated a call with one connection.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendConnected
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.Endpoint} params.recipient - The recipient.
-	     * @return {Promise}
-	     */
-	    that.sendConnected = function (params) {
-	        params = params || {};
-	        params.signalType = 'connected';
-
-	        if (!that.isConnected()) {
-	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	        }
-
-	        return that.sendSignal(params);
-	    };
-
-	    /**
-	     * Send a message to the remote party indicating a desire to renegotiate media.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.sendModify
-	     * @private
-	     * @param {object} params
-	     * @param {respoke.Endpoint} params.recipient - The recipient.
-	     * @param {string} params.action - The state of the modify request, one of: 'initiate', 'accept', 'reject'
-	     * @return {Promise}
-	     */
-	    that.sendModify = function (params) {
-	        params = params || {};
-	        params.signalType = 'modify';
-
-	        if (['initiate', 'accept', 'reject'].indexOf(params.action) === -1) {
-	            return Q.reject("No valid action in modify signal.");
-	        }
-
-	        if (!that.isConnected()) {
-	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	        }
-
-	        return that.sendSignal(params);
-	    };
-
-	    /**
-	     * Uppercase the first letter of the word.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.firstUpper
-	     * @private
-	     */
-	    function firstUpper(str) {
-	        return str[0].toUpperCase() + str.slice(1);
-	    }
-
-	    /**
-	     * Route different types of signaling messages via events.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routeSignal
-	     * @private
-	     * @param {respoke.SignalingMessage} message - A message to route
-	     * @fires respoke.Call#offer
-	     * @fires respoke.Call#connected
-	     * @fires respoke.Call#answer
-	     * @fires respoke.Call#iceCandidates
-	     * @fires respoke.Call#hangup
-	     * @fires respoke.DirectConnection#offer
-	     * @fires respoke.DirectConnection#connected
-	     * @fires respoke.DirectConnection#answer
-	     * @fires respoke.DirectConnection#iceCandidates
-	     * @fires respoke.DirectConnection#hangup
-	     */
-	    that.routeSignal = function (signal) {
-	        var target = null;
-	        var method = 'do';
-
-	        if (signal.signalType !== 'iceCandidates' || respoke.ridiculous) { // Too many of these!
-	            log.debug(signal.signalType, signal);
-	        }
-
-	        if (signal.target === undefined) {
-	            throw new Error("target undefined");
-	        }
-
-	        // Only create if this signal is an offer.
-	        Q.fcall(function makePromise() {
-	            var endpoint;
-	            /*
-	             * This will return calls regardless of whether they are associated
-	             * with a direct connection or not, and it will create a call if no
-	             * call is found and this signal is an offer. Direct connections get
-	             * created in the next step.
-	             *
-	             * signal.toOriginal will be undefined except in the case that another connection
-	             * with our same endpointId has just hung up on the call.
-	             */
-	            target = client.getCall({
-	                id: signal.sessionId,
-	                endpointId: signal.toOriginal || signal.fromEndpoint,
-	                target: signal.target,
-	                conferenceId: signal.conferenceId,
-	                type: signal.fromType,
-	                create: (signal.target !== 'directConnection' && signal.signalType === 'offer'),
-	                callerId: signal.callerId
-	            });
-	            if (target) {
-	                return target;
-	            }
-
-	            if (signal.target === 'directConnection') {
-	                // return a promise
-	                endpoint = client.getEndpoint({
-	                    id: signal.fromEndpoint,
-	                    skipPresence: true
-	                });
-
-	                if (endpoint.directConnection && endpoint.directConnection.call.id === signal.sessionId) {
-	                    return endpoint.directConnection;
-	                }
-
-	                return endpoint.startDirectConnection({
-	                    id: signal.sessionId,
-	                    create: (signal.signalType === 'offer'),
-	                    caller: (signal.signalType !== 'offer')
-	                });
-	            }
-	        }).done(function successHandler(target) {
-	            // target might be null, a Call, or a DirectConnection.
-	            if (target) {
-	                target = target.call || target;
-	            }
-	            if (!target || target.id !== signal.sessionId) {
-	                // orphaned signal
-	                log.warn("Couldn't associate signal with a call. This is usually OK.", signal);
-	                return;
-	            }
-
-	            method += firstUpper(signal.signalType);
-	            routingMethods[method]({
-	                call: target,
-	                signal: signal
-	            });
-	        }, null);
-	    };
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routingMethods.doOffer
-	     * @private
-	     * @params {object} params
-	     * @params {object} params.signal
-	     * @fires respoke.Call#signal-offer
-	     */
-	    routingMethods.doOffer = function (params) {
-	        params.call.connectionId = params.signal.fromConnection;
-	        /**
-	         * Send the `offer` signal into the Call.
-	         * @event respoke.Call#signal-offer
-	         * @type {respoke.Event}
-	         * @property {object} signal
-	         * @property {string} name - the event name.
-	         * @property {respoke.Call} target
-	         */
-	        params.call.fire('signal-offer', {
-	            signal: params.signal
-	        });
-	    };
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routingMethods.doConnected
-	     * @private
-	     * @params {object} params
-	     * @params {object} params.signal
-	     * @fires respoke.Call#signal-connected
-	     */
-	    routingMethods.doConnected = function (params) {
-	        /**
-	         * Send the `connected` signal into the Call.
-	         * @event respoke.Call#signal-connected
-	         * @type {respoke.Event}
-	         * @property {object} signal
-	         * @property {string} name - the event name.
-	         * @property {respoke.Call} target
-	         */
-	        params.call.fire('signal-connected', {
-	            signal: params.signal
-	        });
-	    };
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routingMethods.dModify
-	     * @private
-	     * @params {object} params
-	     * @params {object} params.signal
-	     * @fires respoke.Call#signal-modify
-	     */
-	    routingMethods.doModify = function (params) {
-	        /**
-	         * Send the `modify` signal into the Call.
-	         * @event respoke.Call#signal-modify
-	         * @type {respoke.Event}
-	         * @property {object} signal
-	         * @property {string} name - the event name.
-	         * @property {respoke.Call} target
-	         */
-	        params.call.fire('signal-modify', {
-	            signal: params.signal
-	        });
-	    };
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routingMethods.doAnswer
-	     * @private
-	     * @params {object} params
-	     * @params {object} params.signal
-	     * @fires respoke.Call#signal-answer
-	     */
-	    routingMethods.doAnswer = function (params) {
-	        params.call.connectionId = params.signal.fromConnection;
-	        /**
-	         * Send the `answer` signal into the Call.
-	         * @event respoke.Call#signal-answer
-	         * @type {respoke.Event}
-	         * @property {object} signal
-	         * @property {string} name - the event name.
-	         * @property {respoke.Call} target
-	         */
-	        params.call.fire('signal-answer', {
-	            signal: params.signal
-	        });
-	    };
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routingMethods.doIceCandidates
-	     * @private
-	     * @params {object} params
-	     * @params {object} params.signal
-	     * @fires respoke.Call#signal-icecandidates
-	     */
-	    routingMethods.doIceCandidates = function (params) {
-	        /**
-	         * Send the `icecandidates` signal into the Call.
-	         * @event respoke.Call#signal-icecandidates
-	         * @type {respoke.Event}
-	         * @property {object} signal
-	         * @property {string} name - the event name.
-	         * @property {respoke.Call} target
-	         */
-	        params.call.fire('signal-icecandidates', {
-	            signal: params.signal
-	        });
-	    };
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routingMethods.doBye
-	     * @private
-	     * @params {object} params
-	     * @params {object} params.signal
-	     * @fires respoke.Call#signal-hangup
-	     */
-	    routingMethods.doBye = function (params) {
-	        /**
-	         *  The caller may receive hangup from one or more parties after connectionId is set if the call is rejected
-	         *  by a connection that didn't win the call. In this case, we have to ignore the signal since
-	         *  we are already on a call.
-	         *
-	         *  The callee's connectionId is always set.
-	         */
-	        if (params.call.caller && params.call.connectionId &&
-	                params.call.connectionId !== params.signal.fromConnection) {
-	            return;
-	        }
-	        /**
-	         * Send the `hangup` signal into the Call.
-	         * @event respoke.Call#signal-hangup
-	         * @type {respoke.Event}
-	         * @property {object} signal
-	         * @property {string} name - the event name.
-	         * @property {respoke.Call} target
-	         */
-	        params.call.fire('signal-hangup', {
-	            signal: params.signal
-	        });
-	    };
-
-	    /**
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.routingMethods.doUnknown
-	     * @private
-	     * @params {object} params
-	     * @params {object} params.signal
-	     */
-	    routingMethods.doUnknown = function (params) {
-	        log.error("Don't know what to do with", params.signal.target, "msg of unknown type", params.signal.signalType);
-	    };
-
-	    /**
-	     * Add a handler to the connection for messages of different types.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.addHandler
-	     * @private
-	     * @param {object} params
-	     * @param {string} params.type - The type of socket message, i. e., 'message', 'presence', 'join'
-	     * @param {function} params.handler - A function to which to pass the message
-	     * @todo TODO See if this is necessary anymore
-	     */
-	    that.addHandler = function (params) {
-	        if (socket.socket && socket.socket.open) {
-	            socket.on(params.type, params.handler);
-	        } else {
-	            handlerQueue[params.type].push(params.handler);
-	        }
-	    };
-
-	    /**
-	     * Socket handler for pub-sub messages.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.onPubSub
-	     * @param {object} message The Socket.io message.
-	     * @private
-	     * @fires respoke.Group#message
-	     * @fires respoke.Client#message
-	     */
-	    var onPubSub = function onPubSub(message) {
-	        var group;
-	        var groupMessage = respoke.TextMessage({
-	            rawMessage: message
-	        });
-
-	        group = client.getGroup({id: message.header.channel});
-	        if (group) {
-	            /**
-	             * Indicate that a message has been received to a group.
-	             * @event respoke.Group#message
-	             * @type {respoke.Event}
-	             * @property {respoke.TextMessage} message
-	             * @property {string} name - the event name.
-	             * @property {respoke.Group} target
-	             */
-	            group.fire('message', {
-	                message: groupMessage
-	            });
-	        }
-	        /**
-	         * Indicate that a message has been received.
-	         * @event respoke.Client#message
-	         * @type {respoke.Event}
-	         * @property {respoke.TextMessage} message
-	         * @property {respoke.Group} [group] - If the message is to a group we already know about,
-	         * this will be set. If null, the developer can use client.join({id: evt.message.header.channel}) to join
-	         * the group. From that point forward, Group#message will fire when a message is received as well. If
-	         * group is undefined instead of null, the message is not a group message at all.
-	         * @property {string} name - the event name.
-	         * @property {respoke.Client} target
-	         */
-	        client.fire('message', {
-	            message: groupMessage,
-	            group: group || null
-	        });
-	    };
-
-	    /**
-	     * Socket handler for join messages.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.onJoin
-	     * @param {object} message The Socket.io message.
-	     * @private
-	     */
-	    var onJoin = function onJoin(message) {
-	        var group;
-	        var presenceMessage;
-	        var endpoint;
-	        var connection;
-
-	        if (message.connectionId === client.connectionId) {
-	            connection = client.getConnection({connectionId: message.connectionId, endpointId: message.endpointId});
-	            group = client.getGroup({id: message.header.channel});
-	            if (!group) {
-	                group = respoke.Group({
-	                    id: message.header.channel,
-	                    instanceId: instanceId,
-	                    signalingChannel: that
-	                });
-	                client.addGroup(group);
-	            }
-	            if (!group.isJoined()) {
-	                group.addMember({connection: connection});
-	                client.fire('join', {
-	                    group: group
-	                });
-	            }
-	        } else {
-
-	            endpoint = client.getEndpoint({
-	                skipPresence: true,
-	                id: message.endpointId,
-	                instanceId: instanceId,
-	                name: message.endpointId
-	            });
-
-	            // Handle presence not associated with a channel
-	            if (!connection) {
-	                endpoint.setPresence({
-	                    connectionId: message.connectionId
-	                });
-	                connection = client.getConnection({
-	                    connectionId: message.connectionId,
-	                    endpointId: message.endpointId
-	                });
-	            }
-
-	            group = client.getGroup({id: message.header.channel});
-
-	            if (group && connection) {
-	                group.addMember({connection: connection});
-	            } else {
-	                log.error("Can't add endpoint to group:", message, group, endpoint, connection);
-	            }
-	        }
-	    };
-
-	    /**
-	     * Socket handler for leave messages.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.onLeave
-	     * @param {object} message The Socket.io message.
-	     * @private
-	     */
-	    var onLeave = function onLeave(message) {
-	        var group;
-	        var presenceMessage;
-	        var endpoint;
-	        if (message.connectionId === client.connectionId) {
-	            group = client.getGroup({id: message.header.channel});
-	            client.fire('leave', {
-	                group: group
-	            });
-	        } else {
-
-	            endpoint = client.getEndpoint({
-	                skipPresence: true,
-	                id: message.endpointId
-	            });
-
-	            endpoint.connections.every(function eachConnection(conn, index) {
-	                if (conn.id === message.connectionId) {
-	                    endpoint.connections.splice(index, 1);
-	                    return false;
-	                }
-	                return true;
-	            });
-
-	            group = client.getGroup({id: message.header.channel});
-	            if (group) {
-	                group.removeMember({connectionId: message.connectionId});
-	            }
-	        }
-	    };
-
-	    /**
-	     * Socket handler for presence messages.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.onMessage
-	     * @param {object} message The Socket.io message.
-	     * @private
-	     * @fires respoke.Endpoint#message
-	     * @fires respoke.Client#message
-	     */
-	    var onMessage = function onMessage(message) {
-	        var endpoint;
-	        message = respoke.TextMessage({rawMessage: message});
-	        if (message.originalRecipient || message.endpointId) {
-	            endpoint = client.getEndpoint({
-	                id: message.originalRecipient || message.endpointId,
-	                skipCreate: true
-	            });
-	        }
-	        if (endpoint) {
-	            /**
-	             * Indicate that a message has been received.
-	             * @event respoke.Endpoint#message
-	             * @type {respoke.Event}
-	             * @property {respoke.TextMessage} message
-	             * @property {string} name - the event name.
-	             * @property {respoke.Endpoint} target
-	             */
-	            endpoint.fire('message', {
-	                message: message
-	            });
-	        }
-	        /**
-	         * Indicate that a message has been received.
-	         * @event respoke.Client#message
-	         * @type {respoke.Event}
-	         * @property {respoke.TextMessage} message
-	         * @property {respoke.Endpoint} [endpoint] - If the message is from an endpoint we already know about,
-	         * this will be set. If null, the developer can use client.getEndpoint({id: evt.message.endpointId}) to get
-	         * the Endpoint. From that point forward, Endpoint#message will fire when a message is received as well.
-	         * @property {string} name - the event name.
-	         * @property {respoke.Client} target
-	         */
-	        client.fire('message', {
-	            endpoint: endpoint || null,
-	            message: message
-	        });
-	    };
-
-	    /**
-	     * Create a socket handler for the onConnect event with all the right things in scope.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.generateConnectHandler
-	     * @param {respoke.Client.successHandler} [onSuccess] - Success handler for this invocation of
-	     * this method only.
-	     * @param {respoke.Client.errorHandler} [onError] - Error handler for this invocation of this
-	     * method only.
-	     * @private
-	     */
-	    var generateConnectHandler = function generateConnectHandler(onSuccess, onError) {
-	        onSuccess = onSuccess || function () {};
-	        onError = onError || function () {};
-	        return function onConnect() {
-	            Object.keys(handlerQueue).forEach(function addEachHandlerType(category) {
-	                if (!handlerQueue[category]) {
-	                    return;
-	                }
-
-	                handlerQueue[category].forEach(function addEachHandler(handler) {
-	                    socket.on(category, handler);
-	                });
-	                handlerQueue[category] = [];
-	            });
-
-	            wsCall({
-	                path: '/v1/connections',
-	                httpMethod: 'POST',
-	                parameters: {
-	                    capabilities: {
-	                        iceFinalCandidates: true
-	                    }
-	                }
-	            }).done(function successHandler(res) {
-	                log.debug('connections result', res);
-	                client.endpointId = res.endpointId;
-	                client.connectionId = res.id;
-	                onSuccess();
-	            }, onError);
-	        };
-	    };
-
-	    /**
-	     * Socket handler for presence messages.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.onPresence
-	     * @param {object} message The Socket.io message.
-	     * @private
-	     */
-	    function onPresence(message) {
-	        var endpoint;
-	        var groups;
-
-	        if (message.header.from === client.endpointId) {
-	            log.debug('socket.on presence for self ignored', message);
-	            // Skip ourselves
-	            return;
-	        }
-	        log.debug('socket.on presence', message);
-
-	        endpoint = client.getEndpoint({
-	            skipPresence: true,
-	            id: message.header.from,
-	            instanceId: instanceId,
-	            name: message.header.from,
-	            connection: message.header.fromConnection
-	        });
-
-	        endpoint.setPresence({
-	            connectionId: message.header.fromConnection,
-	            presence: message.type
-	        });
-
-	        if (endpoint.presence === 'unavailable') {
-	            groups = client.getGroups();
-	            if (groups) {
-	                groups.forEach(function eachGroup(group) {
-	                    group.removeMember({connectionId: message.header.fromConnection});
-	                });
-	            }
-	        }
-	    }
-
-	    /**
-	     * On reconnect, start with a reconnect interval of 2000ms. Every time reconnect fails, the interval
-	     * is doubled up to a maximum of 5 minutes. From then on, it will attempt to reconnect every 5 minutes forever.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.reconnect
-	     * @private
-	     */
-	    function reconnect() {
-	        if (clientSettings.reconnect !== true) {
-	            return;
-	        }
-	        // Reconnects within reconnects is ungood
-	        clientSettings.reconnect = false;
-
-	        appToken = null;
-	        token = null;
-
-	        if (socket) {
-	            socket.removeAllListeners();
-	            socket.disconnect();
-	            socket = null;
-	        }
-
-	        reconnectTimeout = (reconnectTimeout === null) ? 2500 : 2 * reconnectTimeout;
-
-	        if (reconnectTimeout > (maxReconnectTimeout)) {
-	            reconnectTimeout = maxReconnectTimeout;
-	        }
-
-	        setTimeout(function doReconnect() {
-	            log.debug('Reconnecting...');
-
-	            actuallyConnect().then(function successHandler() {
-	                reconnectTimeout = null;
-	                log.debug('socket reconnected');
-	                return Q.all(client.getGroups().map(function iterGroups(group) {
-	                    client.join({
-	                        id: group.id,
-	                        onMessage: clientSettings.onMessage,
-	                        onJoin: clientSettings.onJoin,
-	                        onLeave: clientSettings.onLeave
-	                    }).catch(function (err) {
-	                        log.error("Couldn't rejoin previous group.", { id: group.id, message: err.message, stack: err.stack });
-	                        throw err;
-	                    });
-	                }));
-	            }).then(function successHandler() {
-	                log.debug('groups rejoined after reconnect');
-	                /**
-	                 * Indicate that a reconnect has succeeded.
-	                 * @event respoke.Client#reconnect
-	                 * @property {string} name - the event name.
-	                 * @property {respoke.Client}
-	                 */
-	                client.fire('reconnect');
-	            }).fin(function finHandler() {
-	                // re-enable reconnects
-	                clientSettings.reconnect = true;
-	            }).done(null, function errHandler(err) {
-	                log.error("Couldn't reconnect. Retrying...", { message: err.message, stack: err.stack });
-	                reconnect();
-	            });
-	        }, reconnectTimeout);
-	    }
-
-	    /**
-	     * Authenticate to the cloud and call the handler on state change.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.authenticate
-	     * @private
-	     * @param {object} params
-	     * @return {Promise}
-	     */
-	    that.authenticate = function (params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var pieces = [];
-	        var protocol = null;
-	        var host = null;
-	        var port = null;
-
-	        if (!appToken) {
-	            deferred.reject(new Error("Can't open a websocket without an app token."));
-	        }
-
-	        pieces = clientSettings.baseURL.split(/:\/\//);
-	        protocol = pieces[0];
-	        pieces = pieces[1].split(/:/);
-	        host = pieces[0];
-	        port = pieces[1];
-
-	        var connectParams = {
-	            'connect timeout': clientSettings.connectTimeoutMillis,
-	            'force new connection': true, // Don't try to reuse old connection.
-	            'sync disconnect on unload': true, // have Socket.io call disconnect() on the browser unload event.
-	            reconnect: false,
-	            host: host,
-	            port: port || '443',
-	            protocol: protocol,
-	            secure: (protocol === 'https'),
-	            query: '__sails_io_sdk_version=0.10.0&app-token=' + appToken + '&Respoke-SDK=' + sdkHeaderValue
-	        };
-
-	        if (that.isConnected() || isConnecting()) {
-	            return;
-	        }
-	        socket = io.connect(clientSettings.baseURL, connectParams);
-
-	        socket.on('connect', generateConnectHandler(function onSuccess() {
-	            deferred.resolve();
-	        }, function onError(err) {
-	            deferred.reject(err);
-	        }));
-
-	        socket.on('join', onJoin);
-	        socket.on('leave', onLeave);
-	        socket.on('pubsub', onPubSub);
-	        socket.on('message', onMessage);
-	        socket.on('presence', onPresence);
-
-	        // connection timeout
-	        socket.on('connect_failed', function connectFailedHandler(res) {
-	            deferred.reject(new Error("WebSocket connection failed."));
-	            log.error('Socket.io connect timeout.', res || "");
-	            reconnect();
-	        });
-
-	        // handshake error, 403, socket disconnects on FireFox
-	        socket.on('error', function errorHandler(res) {
-	            log.error('Socket.io error.', res || "");
-	            reconnect();
-	        });
-
-	        that.addHandler({
-	            type: 'signal',
-	            handler: function signalHandler(message) {
-	                var knownSignals = ['offer', 'answer', 'connected', 'modify', 'iceCandidates', 'bye'];
-	                var signal = respoke.SignalingMessage({
-	                    rawMessage: message
-	                });
-
-	                if (signal.signalType === 'ack') {
-	                    return;
-	                }
-
-	                if (!signal.target || !signal.signalType || knownSignals.indexOf(signal.signalType) === -1) {
-	                    log.error("Got malformed signal.", signal);
-	                    throw new Error("Can't route signal without target or type.");
-	                }
-
-	                that.routeSignal(signal);
-	            }
-	        });
-
-	        socket.on('disconnect', function onDisconnect() {
-	            log.debug('Socket.io disconnect.');
-	            pendingRequests.reset(function (pendingRequest) {
-	                log.debug('Failing pending requests');
-	                pendingRequest.reject(new Error("WebSocket disconnected"));
-	            });
-
-	            /**
-	             * Indicate that this client has been disconnected from the Respoke service.
-	             * @event respoke.Client#disconnect
-	             * @property {string} name - the event name.
-	             * @property {respoke.Client} target
-	             */
-	            client.fire('disconnect');
-
-	            reconnect();
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Get ephemeral TURN credentials.  This method is called whenever a call is either
-	     * sent or received, prior to creating a PeerConnection
-	     *
-	     * @memberof! respoke.SignalingChannel
-	     * @private
-	     * @method respoke.SignalingChannel.getTurnCredentials
-	     * @return {Promise<Array>}
-	     */
-	    that.getTurnCredentials = function () {
-	        var deferred = Q.defer();
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        wsCall({
-	            httpMethod: 'GET',
-	            path: '/v1/turn'
-	        }).done(function successHandler(creds) {
-	            var result = [];
-
-	            if (!creds || !creds.uris) {
-	                deferred.reject(new Error("Turn credentials empty."));
-	                return;
-	            }
-
-	            creds.uris.forEach(function saveTurnUri(uri) {
-	                var cred = null;
-
-	                if (!uri) {
-	                    return;
-	                }
-
-	                cred = createIceServer(uri, creds.username, creds.password);
-	                result.push(cred);
-	            });
-
-	            if (result.length === 0) {
-	                deferred.reject(new Error("Got no TURN credentials."));
-	            }
-
-	            log.debug('TURN creds', result);
-	            deferred.resolve(result);
-	        }, function errorHandler(err) {
-	            deferred.reject(err);
-	        });
-
-	        return deferred.promise;
-	    };
-
-	    /**
-	     * Construct a websocket API call and return the formatted response and errors. The 'success'
-	     * attribute indicates the success or failure of the API call. The 'response' attribute
-	     * is an associative array constructed by json.decode. The 'error' attriute is a message.
-	     * If the API call is successful but the server returns invalid JSON, error will be
-	     * "Invalid JSON." and response will be the unchanged content of the response body.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.wsCall
-	     * @private
-	     * @param {object} params
-	     * @param {string} params.httpMethod
-	     * @param {string} params.path
-	     * @param {string} params.objectId
-	     * @param {object} params.parameters - These are request body parameters that get converted to JSON before
-	     * being sent over the websocket. Undefined parameters and functions are removed by JSON.stringify.
-	     * @return {Promise<object>}
-	     */
-	    function wsCall(params) {
-	        params = params || {};
-	        var deferred = Q.defer();
-	        var start = now();
-	        // Too many of these!
-	        var logRequest = (params.path.indexOf('messages') === -1 && params.path.indexOf('signaling') === -1) ||
-	            respoke.ridiculous;
-	        var request;
-	        var bodyLength = 0;
-	        if (params.parameters) {
-	            bodyLength = encodeURI(JSON.stringify(params.parameters)).split(/%..|./).length - 1;
-	        }
-
-	        if (!that.isConnected()) {
-	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
-	            return deferred.promise;
-	        }
-
-	        if (!params) {
-	            deferred.reject(new Error('No params.'));
-	            return deferred.promise;
-	        }
-
-	        if (!params.path) {
-	            deferred.reject(new Error('No request path.'));
-	            return deferred.promise;
-	        }
-
-	        if (bodyLength > bodySizeLimit) {
-	            deferred.reject(new Error('Request body exceeds maximum size of ' + bodySizeLimit + ' bytes'));
-	            return deferred.promise;
-	        }
-
-	        params.httpMethod = (params.httpMethod || 'get').toLowerCase();
-
-	        if (params.urlParams) {
-	            params.path = template.parse(params.path).expand(params.urlParams);
-	        }
-
-	        if (logRequest) {
-	            log.debug('socket request', {
-	                method: params.httpMethod,
-	                path: params.path,
-	                parameters: params.parameters
-	            });
-	        }
-
-	        request = {
-	            method: params.httpMethod,
-	            path: params.path,
-	            parameters: params.parameters,
-	            tries: 0,
-	            durationMillis: 0
-	        };
-
-	        request.id = pendingRequests.add(deferred);
-
-	        function handleResponse(response) {
-	            var thisHandler = this; // jshint ignore:line
-	            /*
-	             * Response:
-	             *  {
-	             *      body: {},
-	             *      headers: {},
-	             *      statusCode: 200
-	             *  }
-	             */
-	            try {
-	                response.body = JSON.parse(response.body);
-	            } catch (e) {
-	                if (typeof response.body !== 'object') {
-	                    deferred.reject(new Error("Server response could not be parsed!" + response.body));
-	                    return;
-	                }
-	            }
-
-	            if (response.statusCode === 429) {
-	                if (request.tries < 3 && deferred.promise.isPending()) {
-	                    setTimeout(function () {
-	                        start = now();
-	                        sendWebsocketRequest(request, handleResponse);
-	                    }, 1000); // one day this will be response.interval or something
-	                } else {
-	                    request.durationMillis = now() - start;
-	                    pendingRequests.remove(request.id);
-	                    failWebsocketRequest(request, response,
-	                            "Too many retries after rate limit exceeded.", deferred);
-	                }
-	                return;
-	            }
-
-	            request.durationMillis = now() - start;
-	            pendingRequests.remove(request.id);
-
-	            if (logRequest) {
-	                log.debug('socket response', {
-	                    method: request.method,
-	                    path: request.path,
-	                    durationMillis: request.durationMillis,
-	                    response: response
-	                });
-	            }
-
-	            if (isBillingSuspensionUnauthorizedResponse(response)) {
-	                failWebsocketRequest(request, response, billingSuspensionErrorMessage, deferred);
-	                return;
-	            }
-
-	            if (isSuspensionUnauthorizedResponse(response)) {
-	                failWebsocketRequest(request, response, suspensionErrorMessage, deferred);
-	                return;
-	            }
-
-	            if ([200, 204, 205, 302, 401, 403, 404, 418].indexOf(thisHandler.status) === -1) {
-	                failWebsocketRequest(request, response,
-	                        response.body.error || errors[thisHandler.status] || "Unknown error", deferred);
-	                return;
-	            }
-
-	            deferred.resolve(response.body);
-	        }
-
-	        start = now();
-	        sendWebsocketRequest(request, handleResponse);
-	        return deferred.promise;
-	    }
-
-	    function failWebsocketRequest(request, response, error, deferred) {
-	        if (response && response.body && response.body.error) {
-	            deferred.reject(buildResponseError(response, error + ' (' + request.method + ' ' + request.path + ')'));
-	        } else {
-	            deferred.resolve(response.body);
-	        }
-	    }
-
-	    function sendWebsocketRequest(request, handleResponse) {
-	        request.tries += 1;
-	        socket.emit(request.method, JSON.stringify({
-	            url: request.path,
-	            data: request.parameters,
-	            headers: {
-	                'App-Token': appToken,
-	                'Respoke-SDK': sdkHeaderValue }
-	        }), handleResponse);
-	    }
-
-	    /**
-	     * Construct an API call and return the formatted response and errors. The 'success'
-	     * attribute indicates the success or failure of the API call. The 'response' attribute
-	     * is an associative array constructed by json.decode. The 'error' attribute is a message.
-	     * If the API call is successful but the server returns invalid JSON, error will be
-	     * "Invalid JSON." and response will be the unchanged content of the response body.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.call
-	     * @private
-	     * @param {object} params
-	     * @param {string} params.httpMethod
-	     * @param {string} params.objectId
-	     * @param {string} params.path
-	     * @param {object} params.parameters
-	     * @returns {Promise}
-	     */
-	    function call(params) {
-	        /* Params go in the URI for GET, DELETE, same format for
-	         * POST and PUT, but they must be sent separately after the
-	         * request is opened. */
-	        var deferred = Q.defer();
-	        var paramString = null;
-	        var uri = null;
-	        var response = {
-	            body: null,
-	            statusCode: null
-	        };
-	        var start = now();
-
-	        uri = clientSettings.baseURL + params.path;
-
-	        if (!params) {
-	            deferred.reject(new Error('No params.'));
-	            return;
-	        }
-
-	        if (!params.httpMethod) {
-	            deferred.reject(new Error('No HTTP method.'));
-	            return;
-	        }
-
-	        if (!params.path) {
-	            deferred.reject(new Error('No request path.'));
-	            return;
-	        }
-
-	        if (params.urlParams) {
-	            uri = template.parse(uri).expand(params.urlParams);
-	        }
-
-	        if (['GET', 'DELETE'].indexOf(params.httpMethod) > -1) {
-	            uri += makeParamString(params.parameters);
-	        }
-
-	        xhr.open(params.httpMethod, uri);
-	        xhr.setRequestHeader('Respoke-SDK', sdkHeaderValue);
-	        if (appToken) {
-	            xhr.setRequestHeader("App-Token", appToken);
-	        }
-	        if (['POST', 'PUT'].indexOf(params.httpMethod) > -1) {
-	            paramString = JSON.stringify(params.parameters);
-	            if (paramString.length > bodySizeLimit) {
-	                deferred.reject(new Error('Request body exceeds maximum size of ' + bodySizeLimit + ' bytes'));
-	                return;
-	            }
-	            xhr.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
-	        } else if (['GET', 'DELETE'].indexOf(params.httpMethod) === -1) {
-	            deferred.reject(new Error('Illegal HTTP request method ' + params.httpMethod));
-	            return;
-	        }
-	        log.debug('request', {
-	            method: params.httpMethod,
-	            uri: uri,
-	            params: paramString
-	        });
-
-	        try {
-	            xhr.send(paramString);
-	        } catch (err) {
-	            deferred.reject(err);
-	            return;
-	        }
-
-	        xhr.onreadystatechange = function () {
-	            var durationMillis = now() - start;
-	            var limit;
-	            var unit;
-
-	            if (this.readyState !== 4) {
-	                return;
-	            }
-
-	            if (this.status === 0) {
-	                deferred.reject(new Error("Status is 0: Incomplete request, SSL error, or CORS error."));
-	                return;
-	            }
-
-	            response.statusCode = this.status;
-	            response.headers = getAllResponseHeaders(this);
-	            response.uri = uri;
-	            response.params = params.parameters;
-	            response.error = errors[this.status];
-
-	            if (this.response) {
-	                try {
-	                    response.body = JSON.parse(this.response);
-	                } catch (e) {
-	                    response.body = this.response;
-	                    response.error = "Invalid JSON.";
-	                }
-	            }
-
-	            log.debug('response', {
-	                method: params.httpMethod,
-	                durationMillis: durationMillis,
-	                response: response
-	            });
-
-	            if ([200, 204, 205, 302, 401, 403, 404, 418].indexOf(this.status) > -1) {
-	                deferred.resolve(response);
-	            } else if (this.status === 429) {
-	                unit = getResponseHeader(this, 'RateLimit-Time-Units');
-	                limit = getResponseHeader(this, 'RateLimit-Limit');
-	                deferred.reject(buildResponseError(response, "Rate limit of " + limit + "/" + unit +
-	                    " exceeded. Try again in 1 " + unit + "."));
-	            } else {
-	                deferred.reject(buildResponseError(response, 'unexpected response code ' + this.status));
-	            }
-	        };
-
-	        return deferred.promise;
-	    }
-
-	    function isSuspensionUnauthorizedResponse(response) {
-	        return (response.statusCode === 401) && response.body && response.body.details &&
-	            (typeof response.body.details.message === 'string') &&
-	            (response.body.details.message.indexOf('suspended') > -1);
-	    }
-
-	    function isBillingSuspensionUnauthorizedResponse(response) {
-	        return isSuspensionUnauthorizedResponse(response) &&
-	            (typeof response.body.details.reason === 'string') &&
-	            (response.body.details.reason.indexOf('billing suspension') > -1);
-	    }
-
-	    /**
-	     * Turn key/value and key/list pairs into an HTTP URL parameter string.
-	     * var1=value1&var2=value2,value3,value4
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.makeParamString
-	     * @private
-	     * @param {object} params - Arbitrary collection of strings and arrays to serialize.
-	     * @returns {string}
-	     */
-	    function makeParamString(params) {
-	        var strings = [];
-	        if (!params) {
-	            return '';
-	        }
-
-	        Object.keys(params).forEach(function formatParam(name) {
-	            var value = params[name];
-	            /* Skip objects -- We won't know how to name these. */
-	            if (value instanceof Array) {
-	                strings.push([name, value.join(',')].join('='));
-	            } else if (typeof value !== 'object' && typeof value !== 'function') {
-	                strings.push([name, value].join('='));
-	            }
-	        });
-
-	        if (strings.length > 0) {
-	            return '?' + strings.join('&');
-	        } else {
-	            return '';
-	        }
-	    }
-
-	    /**
-	     * Tries to retrieve a single header value from an XHR response. If the header is disallowed,
-	     * or does not exist, will return null. Otherwise returns the value of the header.
-	     *
-	     * The CORS spec does not define what the browser should do in the case of a request for a
-	     * disallowed header, but at least Chrome throws an exception.
-	     *
-	     * @param {object} xhrResponse The response of an XMLHttpRequest
-	     * @param {string} header The name of the header to retrieve the value for
-	     * @returns {string|null} The value(s) of the header, or null if disallowed or unavailable.
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.getResponseHeader
-	     * @private
-	     */
-	    function getResponseHeader(xhrResponse, header) {
-	        try {
-	            return xhrResponse.getResponseHeader(header);
-	        } catch (e) {
-	            return null;
-	        }
-	    }
-
-	    /**
-	     * Retrieves all headers from an XHR response as key/val pairs
-	     *
-	     * @param {object} xhrResponse The response of an XMLHttpRequest
-	     * @returns {*} the key/val pairs of the response headers
-	     * @memberof! respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.getAllResponseHeaders
-	     * @private
-	     */
-	    function getAllResponseHeaders(xhrResponse) {
-	        var result = {};
-	        var headers;
-	        var pairs;
-
-	        headers = xhrResponse.getAllResponseHeaders();
-	        if (!headers) {
-	            return result;
-	        }
-
-	        // 1 header per line (cr+lf)
-	        pairs = headers.split('\u000d\u000a');
-	        pairs.forEach(function (pair) {
-	            var key;
-	            var val;
-
-	            // key separated from value by ': '
-	            // value may contain ': ', so using indexOf instead of split
-	            var index = pair.indexOf('\u003a\u0020');
-	            if (index > 0) {
-	                key = pair.substring(0, index);
-	                val = pair.substring(index + 2);
-	                result[key] = val;
-	            }
-	        });
-
-	        return result;
-	    }
-
-	    /**
-	     * Creates an Error with the supplied `message` and, if available, the `Request-Id` header
-	     * from the supplied `response`.
-	     *
-	     * @param {object} res
-	     * @param {object} [res.headers]
-	     * @param {string} [res.headers.Request-Id] The requestId to append to the Error message
-	     * @param {string} message The message the Error should be constructed with
-	     * @returns {Error} the constructed Error object
-	     * @memberof respoke.SignalingChannel
-	     * @method respoke.SignalingChannel.buildResponseError
-	     * @api private
-	     */
-	    function buildResponseError(res, message) {
-	        var requestId = res && res.headers && res.headers['Request-Id'];
-	        if (requestId) {
-	            message += ' [Request-Id: ' + requestId + ']';
-	        }
-
-	        return new Error(message);
-	    }
-
-	    return that;
-	}; // End respoke.SignalingChannel
-	/**
-	 * Handle an error that resulted from a method call.
-	 * @callback respoke.SignalingChannel.errorHandler
-	 * @params {Error} err
-	 */
-	/**
-	 * Handle sending successfully.
-	 * @callback respoke.SignalingChannel.sendHandler
-	 */
-	/**
-	 * Receive a group.
-	 * @callback respoke.SignalingChannel.groupHandler
-	 * @param {respoke.Group}
-	 */
-	/**
-	 * Receive a list of groups.
-	 * @callback respoke.SignalingChannel.groupListHandler
-	 * @param {Array}
-	 */
-	/**
-	 * Receive a list of TURN credentials.
-	 * @callback respoke.SignalingChannel.turnSuccessHandler
-	 * @param {Array}
-	 */
-
-
-/***/ },
-/* 14 */
 /***/ function(module, exports, __webpack_require__) {
 
 	var __WEBPACK_AMD_DEFINE_ARRAY__, __WEBPACK_AMD_DEFINE_RESULT__;/* WEBPACK VAR INJECTION */(function(module) {/*! Socket.IO.js build:0.9.17, development. Copyright(c) 2011 LearnBoost <dev@learnboost.com> MIT Licensed */
@@ -14151,10 +5563,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	  !(__WEBPACK_AMD_DEFINE_ARRAY__ = [], __WEBPACK_AMD_DEFINE_RESULT__ = function () { return io; }.apply(exports, __WEBPACK_AMD_DEFINE_ARRAY__), __WEBPACK_AMD_DEFINE_RESULT__ !== undefined && (module.exports = __WEBPACK_AMD_DEFINE_RESULT__));
 	}
 	})();
-	/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(15)(module)))
+	/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(7)(module)))
 
 /***/ },
-/* 15 */
+/* 7 */
 /***/ function(module, exports) {
 
 	module.exports = function(module) {
@@ -14167,6 +5579,8615 @@ return /******/ (function(modules) { // webpackBootstrap
 		}
 		return module;
 	}
+
+
+/***/ },
+/* 8 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// vim:ts=4:sts=4:sw=4:
+	/*!
+	 *
+	 * Copyright 2009-2012 Kris Kowal under the terms of the MIT
+	 * license found at http://github.com/kriskowal/q/raw/master/LICENSE
+	 *
+	 * With parts by Tyler Close
+	 * Copyright 2007-2009 Tyler Close under the terms of the MIT X license found
+	 * at http://www.opensource.org/licenses/mit-license.html
+	 * Forked at ref_send.js version: 2009-05-11
+	 *
+	 * With parts by Mark Miller
+	 * Copyright (C) 2011 Google Inc.
+	 *
+	 * Licensed under the Apache License, Version 2.0 (the "License");
+	 * you may not use this file except in compliance with the License.
+	 * You may obtain a copy of the License at
+	 *
+	 * http://www.apache.org/licenses/LICENSE-2.0
+	 *
+	 * Unless required by applicable law or agreed to in writing, software
+	 * distributed under the License is distributed on an "AS IS" BASIS,
+	 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+	 * See the License for the specific language governing permissions and
+	 * limitations under the License.
+	 *
+	 */
+
+	(function (definition) {
+	    "use strict";
+
+	    // This file will function properly as a <script> tag, or a module
+	    // using CommonJS and NodeJS or RequireJS module formats.  In
+	    // Common/Node/RequireJS, the module exports the Q API and when
+	    // executed as a simple <script>, it creates a Q global instead.
+
+	    // Montage Require
+	    if (typeof bootstrap === "function") {
+	        bootstrap("promise", definition);
+
+	    // CommonJS
+	    } else if (true) {
+	        module.exports = definition();
+
+	    // RequireJS
+	    } else if (typeof define === "function" && define.amd) {
+	        define(definition);
+
+	    // SES (Secure EcmaScript)
+	    } else if (typeof ses !== "undefined") {
+	        if (!ses.ok()) {
+	            return;
+	        } else {
+	            ses.makeQ = definition;
+	        }
+
+	    // <script>
+	    } else if (typeof self !== "undefined") {
+	        self.Q = definition();
+
+	    } else {
+	        throw new Error("This environment was not anticipated by Q. Please file a bug.");
+	    }
+
+	})(function () {
+	"use strict";
+
+	var hasStacks = false;
+	try {
+	    throw new Error();
+	} catch (e) {
+	    hasStacks = !!e.stack;
+	}
+
+	// All code after this point will be filtered from stack traces reported
+	// by Q.
+	var qStartingLine = captureLine();
+	var qFileName;
+
+	// shims
+
+	// used for fallback in "allResolved"
+	var noop = function () {};
+
+	// Use the fastest possible means to execute a task in a future turn
+	// of the event loop.
+	var nextTick =(function () {
+	    // linked list of tasks (single, with head node)
+	    var head = {task: void 0, next: null};
+	    var tail = head;
+	    var flushing = false;
+	    var requestTick = void 0;
+	    var isNodeJS = false;
+	    // queue for late tasks, used by unhandled rejection tracking
+	    var laterQueue = [];
+
+	    function flush() {
+	        /* jshint loopfunc: true */
+	        var task, domain;
+
+	        while (head.next) {
+	            head = head.next;
+	            task = head.task;
+	            head.task = void 0;
+	            domain = head.domain;
+
+	            if (domain) {
+	                head.domain = void 0;
+	                domain.enter();
+	            }
+	            runSingle(task, domain);
+
+	        }
+	        while (laterQueue.length) {
+	            task = laterQueue.pop();
+	            runSingle(task);
+	        }
+	        flushing = false;
+	    }
+	    // runs a single function in the async queue
+	    function runSingle(task, domain) {
+	        try {
+	            task();
+
+	        } catch (e) {
+	            if (isNodeJS) {
+	                // In node, uncaught exceptions are considered fatal errors.
+	                // Re-throw them synchronously to interrupt flushing!
+
+	                // Ensure continuation if the uncaught exception is suppressed
+	                // listening "uncaughtException" events (as domains does).
+	                // Continue in next event to avoid tick recursion.
+	                if (domain) {
+	                    domain.exit();
+	                }
+	                setTimeout(flush, 0);
+	                if (domain) {
+	                    domain.enter();
+	                }
+
+	                throw e;
+
+	            } else {
+	                // In browsers, uncaught exceptions are not fatal.
+	                // Re-throw them asynchronously to avoid slow-downs.
+	                setTimeout(function () {
+	                    throw e;
+	                }, 0);
+	            }
+	        }
+
+	        if (domain) {
+	            domain.exit();
+	        }
+	    }
+
+	    nextTick = function (task) {
+	        tail = tail.next = {
+	            task: task,
+	            domain: isNodeJS && process.domain,
+	            next: null
+	        };
+
+	        if (!flushing) {
+	            flushing = true;
+	            requestTick();
+	        }
+	    };
+
+	    if (typeof process === "object" &&
+	        process.toString() === "[object process]" && process.nextTick) {
+	        // Ensure Q is in a real Node environment, with a `process.nextTick`.
+	        // To see through fake Node environments:
+	        // * Mocha test runner - exposes a `process` global without a `nextTick`
+	        // * Browserify - exposes a `process.nexTick` function that uses
+	        //   `setTimeout`. In this case `setImmediate` is preferred because
+	        //    it is faster. Browserify's `process.toString()` yields
+	        //   "[object Object]", while in a real Node environment
+	        //   `process.nextTick()` yields "[object process]".
+	        isNodeJS = true;
+
+	        requestTick = function () {
+	            process.nextTick(flush);
+	        };
+
+	    } else if (typeof setImmediate === "function") {
+	        // In IE10, Node.js 0.9+, or https://github.com/NobleJS/setImmediate
+	        if (typeof window !== "undefined") {
+	            requestTick = setImmediate.bind(window, flush);
+	        } else {
+	            requestTick = function () {
+	                setImmediate(flush);
+	            };
+	        }
+
+	    } else if (typeof MessageChannel !== "undefined") {
+	        // modern browsers
+	        // http://www.nonblocking.io/2011/06/windownexttick.html
+	        var channel = new MessageChannel();
+	        // At least Safari Version 6.0.5 (8536.30.1) intermittently cannot create
+	        // working message ports the first time a page loads.
+	        channel.port1.onmessage = function () {
+	            requestTick = requestPortTick;
+	            channel.port1.onmessage = flush;
+	            flush();
+	        };
+	        var requestPortTick = function () {
+	            // Opera requires us to provide a message payload, regardless of
+	            // whether we use it.
+	            channel.port2.postMessage(0);
+	        };
+	        requestTick = function () {
+	            setTimeout(flush, 0);
+	            requestPortTick();
+	        };
+
+	    } else {
+	        // old browsers
+	        requestTick = function () {
+	            setTimeout(flush, 0);
+	        };
+	    }
+	    // runs a task after all other tasks have been run
+	    // this is useful for unhandled rejection tracking that needs to happen
+	    // after all `then`d tasks have been run.
+	    nextTick.runAfter = function (task) {
+	        laterQueue.push(task);
+	        if (!flushing) {
+	            flushing = true;
+	            requestTick();
+	        }
+	    };
+	    return nextTick;
+	})();
+
+	// Attempt to make generics safe in the face of downstream
+	// modifications.
+	// There is no situation where this is necessary.
+	// If you need a security guarantee, these primordials need to be
+	// deeply frozen anyway, and if you don’t need a security guarantee,
+	// this is just plain paranoid.
+	// However, this **might** have the nice side-effect of reducing the size of
+	// the minified code by reducing x.call() to merely x()
+	// See Mark Miller’s explanation of what this does.
+	// http://wiki.ecmascript.org/doku.php?id=conventions:safe_meta_programming
+	var call = Function.call;
+	function uncurryThis(f) {
+	    return function () {
+	        return call.apply(f, arguments);
+	    };
+	}
+	// This is equivalent, but slower:
+	// uncurryThis = Function_bind.bind(Function_bind.call);
+	// http://jsperf.com/uncurrythis
+
+	var array_slice = uncurryThis(Array.prototype.slice);
+
+	var array_reduce = uncurryThis(
+	    Array.prototype.reduce || function (callback, basis) {
+	        var index = 0,
+	            length = this.length;
+	        // concerning the initial value, if one is not provided
+	        if (arguments.length === 1) {
+	            // seek to the first value in the array, accounting
+	            // for the possibility that is is a sparse array
+	            do {
+	                if (index in this) {
+	                    basis = this[index++];
+	                    break;
+	                }
+	                if (++index >= length) {
+	                    throw new TypeError();
+	                }
+	            } while (1);
+	        }
+	        // reduce
+	        for (; index < length; index++) {
+	            // account for the possibility that the array is sparse
+	            if (index in this) {
+	                basis = callback(basis, this[index], index);
+	            }
+	        }
+	        return basis;
+	    }
+	);
+
+	var array_indexOf = uncurryThis(
+	    Array.prototype.indexOf || function (value) {
+	        // not a very good shim, but good enough for our one use of it
+	        for (var i = 0; i < this.length; i++) {
+	            if (this[i] === value) {
+	                return i;
+	            }
+	        }
+	        return -1;
+	    }
+	);
+
+	var array_map = uncurryThis(
+	    Array.prototype.map || function (callback, thisp) {
+	        var self = this;
+	        var collect = [];
+	        array_reduce(self, function (undefined, value, index) {
+	            collect.push(callback.call(thisp, value, index, self));
+	        }, void 0);
+	        return collect;
+	    }
+	);
+
+	var object_create = Object.create || function (prototype) {
+	    function Type() { }
+	    Type.prototype = prototype;
+	    return new Type();
+	};
+
+	var object_hasOwnProperty = uncurryThis(Object.prototype.hasOwnProperty);
+
+	var object_keys = Object.keys || function (object) {
+	    var keys = [];
+	    for (var key in object) {
+	        if (object_hasOwnProperty(object, key)) {
+	            keys.push(key);
+	        }
+	    }
+	    return keys;
+	};
+
+	var object_toString = uncurryThis(Object.prototype.toString);
+
+	function isObject(value) {
+	    return value === Object(value);
+	}
+
+	// generator related shims
+
+	// FIXME: Remove this function once ES6 generators are in SpiderMonkey.
+	function isStopIteration(exception) {
+	    return (
+	        object_toString(exception) === "[object StopIteration]" ||
+	        exception instanceof QReturnValue
+	    );
+	}
+
+	// FIXME: Remove this helper and Q.return once ES6 generators are in
+	// SpiderMonkey.
+	var QReturnValue;
+	if (typeof ReturnValue !== "undefined") {
+	    QReturnValue = ReturnValue;
+	} else {
+	    QReturnValue = function (value) {
+	        this.value = value;
+	    };
+	}
+
+	// long stack traces
+
+	var STACK_JUMP_SEPARATOR = "From previous event:";
+
+	function makeStackTraceLong(error, promise) {
+	    // If possible, transform the error stack trace by removing Node and Q
+	    // cruft, then concatenating with the stack trace of `promise`. See #57.
+	    if (hasStacks &&
+	        promise.stack &&
+	        typeof error === "object" &&
+	        error !== null &&
+	        error.stack &&
+	        error.stack.indexOf(STACK_JUMP_SEPARATOR) === -1
+	    ) {
+	        var stacks = [];
+	        for (var p = promise; !!p; p = p.source) {
+	            if (p.stack) {
+	                stacks.unshift(p.stack);
+	            }
+	        }
+	        stacks.unshift(error.stack);
+
+	        var concatedStacks = stacks.join("\n" + STACK_JUMP_SEPARATOR + "\n");
+	        error.stack = filterStackString(concatedStacks);
+	    }
+	}
+
+	function filterStackString(stackString) {
+	    var lines = stackString.split("\n");
+	    var desiredLines = [];
+	    for (var i = 0; i < lines.length; ++i) {
+	        var line = lines[i];
+
+	        if (!isInternalFrame(line) && !isNodeFrame(line) && line) {
+	            desiredLines.push(line);
+	        }
+	    }
+	    return desiredLines.join("\n");
+	}
+
+	function isNodeFrame(stackLine) {
+	    return stackLine.indexOf("(module.js:") !== -1 ||
+	           stackLine.indexOf("(node.js:") !== -1;
+	}
+
+	function getFileNameAndLineNumber(stackLine) {
+	    // Named functions: "at functionName (filename:lineNumber:columnNumber)"
+	    // In IE10 function name can have spaces ("Anonymous function") O_o
+	    var attempt1 = /at .+ \((.+):(\d+):(?:\d+)\)$/.exec(stackLine);
+	    if (attempt1) {
+	        return [attempt1[1], Number(attempt1[2])];
+	    }
+
+	    // Anonymous functions: "at filename:lineNumber:columnNumber"
+	    var attempt2 = /at ([^ ]+):(\d+):(?:\d+)$/.exec(stackLine);
+	    if (attempt2) {
+	        return [attempt2[1], Number(attempt2[2])];
+	    }
+
+	    // Firefox style: "function@filename:lineNumber or @filename:lineNumber"
+	    var attempt3 = /.*@(.+):(\d+)$/.exec(stackLine);
+	    if (attempt3) {
+	        return [attempt3[1], Number(attempt3[2])];
+	    }
+	}
+
+	function isInternalFrame(stackLine) {
+	    var fileNameAndLineNumber = getFileNameAndLineNumber(stackLine);
+
+	    if (!fileNameAndLineNumber) {
+	        return false;
+	    }
+
+	    var fileName = fileNameAndLineNumber[0];
+	    var lineNumber = fileNameAndLineNumber[1];
+
+	    return fileName === qFileName &&
+	        lineNumber >= qStartingLine &&
+	        lineNumber <= qEndingLine;
+	}
+
+	// discover own file name and line number range for filtering stack
+	// traces
+	function captureLine() {
+	    if (!hasStacks) {
+	        return;
+	    }
+
+	    try {
+	        throw new Error();
+	    } catch (e) {
+	        var lines = e.stack.split("\n");
+	        var firstLine = lines[0].indexOf("@") > 0 ? lines[1] : lines[2];
+	        var fileNameAndLineNumber = getFileNameAndLineNumber(firstLine);
+	        if (!fileNameAndLineNumber) {
+	            return;
+	        }
+
+	        qFileName = fileNameAndLineNumber[0];
+	        return fileNameAndLineNumber[1];
+	    }
+	}
+
+	function deprecate(callback, name, alternative) {
+	    return function () {
+	        if (typeof console !== "undefined" &&
+	            typeof console.warn === "function") {
+	            console.warn(name + " is deprecated, use " + alternative +
+	                         " instead.", new Error("").stack);
+	        }
+	        return callback.apply(callback, arguments);
+	    };
+	}
+
+	// end of shims
+	// beginning of real work
+
+	/**
+	 * Constructs a promise for an immediate reference, passes promises through, or
+	 * coerces promises from different systems.
+	 * @param value immediate reference or promise
+	 */
+	function Q(value) {
+	    // If the object is already a Promise, return it directly.  This enables
+	    // the resolve function to both be used to created references from objects,
+	    // but to tolerably coerce non-promises to promises.
+	    if (value instanceof Promise) {
+	        return value;
+	    }
+
+	    // assimilate thenables
+	    if (isPromiseAlike(value)) {
+	        return coerce(value);
+	    } else {
+	        return fulfill(value);
+	    }
+	}
+	Q.resolve = Q;
+
+	/**
+	 * Performs a task in a future turn of the event loop.
+	 * @param {Function} task
+	 */
+	Q.nextTick = nextTick;
+
+	/**
+	 * Controls whether or not long stack traces will be on
+	 */
+	Q.longStackSupport = false;
+
+	// enable long stacks if Q_DEBUG is set
+	if (typeof process === "object" && process && process.env && process.env.Q_DEBUG) {
+	    Q.longStackSupport = true;
+	}
+
+	/**
+	 * Constructs a {promise, resolve, reject} object.
+	 *
+	 * `resolve` is a callback to invoke with a more resolved value for the
+	 * promise. To fulfill the promise, invoke `resolve` with any value that is
+	 * not a thenable. To reject the promise, invoke `resolve` with a rejected
+	 * thenable, or invoke `reject` with the reason directly. To resolve the
+	 * promise to another thenable, thus putting it in the same state, invoke
+	 * `resolve` with that other thenable.
+	 */
+	Q.defer = defer;
+	function defer() {
+	    // if "messages" is an "Array", that indicates that the promise has not yet
+	    // been resolved.  If it is "undefined", it has been resolved.  Each
+	    // element of the messages array is itself an array of complete arguments to
+	    // forward to the resolved promise.  We coerce the resolution value to a
+	    // promise using the `resolve` function because it handles both fully
+	    // non-thenable values and other thenables gracefully.
+	    var messages = [], progressListeners = [], resolvedPromise;
+
+	    var deferred = object_create(defer.prototype);
+	    var promise = object_create(Promise.prototype);
+
+	    promise.promiseDispatch = function (resolve, op, operands) {
+	        var args = array_slice(arguments);
+	        if (messages) {
+	            messages.push(args);
+	            if (op === "when" && operands[1]) { // progress operand
+	                progressListeners.push(operands[1]);
+	            }
+	        } else {
+	            Q.nextTick(function () {
+	                resolvedPromise.promiseDispatch.apply(resolvedPromise, args);
+	            });
+	        }
+	    };
+
+	    // XXX deprecated
+	    promise.valueOf = function () {
+	        if (messages) {
+	            return promise;
+	        }
+	        var nearerValue = nearer(resolvedPromise);
+	        if (isPromise(nearerValue)) {
+	            resolvedPromise = nearerValue; // shorten chain
+	        }
+	        return nearerValue;
+	    };
+
+	    promise.inspect = function () {
+	        if (!resolvedPromise) {
+	            return { state: "pending" };
+	        }
+	        return resolvedPromise.inspect();
+	    };
+
+	    if (Q.longStackSupport && hasStacks) {
+	        try {
+	            throw new Error();
+	        } catch (e) {
+	            // NOTE: don't try to use `Error.captureStackTrace` or transfer the
+	            // accessor around; that causes memory leaks as per GH-111. Just
+	            // reify the stack trace as a string ASAP.
+	            //
+	            // At the same time, cut off the first line; it's always just
+	            // "[object Promise]\n", as per the `toString`.
+	            promise.stack = e.stack.substring(e.stack.indexOf("\n") + 1);
+	        }
+	    }
+
+	    // NOTE: we do the checks for `resolvedPromise` in each method, instead of
+	    // consolidating them into `become`, since otherwise we'd create new
+	    // promises with the lines `become(whatever(value))`. See e.g. GH-252.
+
+	    function become(newPromise) {
+	        resolvedPromise = newPromise;
+	        promise.source = newPromise;
+
+	        array_reduce(messages, function (undefined, message) {
+	            Q.nextTick(function () {
+	                newPromise.promiseDispatch.apply(newPromise, message);
+	            });
+	        }, void 0);
+
+	        messages = void 0;
+	        progressListeners = void 0;
+	    }
+
+	    deferred.promise = promise;
+	    deferred.resolve = function (value) {
+	        if (resolvedPromise) {
+	            return;
+	        }
+
+	        become(Q(value));
+	    };
+
+	    deferred.fulfill = function (value) {
+	        if (resolvedPromise) {
+	            return;
+	        }
+
+	        become(fulfill(value));
+	    };
+	    deferred.reject = function (reason) {
+	        if (resolvedPromise) {
+	            return;
+	        }
+
+	        become(reject(reason));
+	    };
+	    deferred.notify = function (progress) {
+	        if (resolvedPromise) {
+	            return;
+	        }
+
+	        array_reduce(progressListeners, function (undefined, progressListener) {
+	            Q.nextTick(function () {
+	                progressListener(progress);
+	            });
+	        }, void 0);
+	    };
+
+	    return deferred;
+	}
+
+	/**
+	 * Creates a Node-style callback that will resolve or reject the deferred
+	 * promise.
+	 * @returns a nodeback
+	 */
+	defer.prototype.makeNodeResolver = function () {
+	    var self = this;
+	    return function (error, value) {
+	        if (error) {
+	            self.reject(error);
+	        } else if (arguments.length > 2) {
+	            self.resolve(array_slice(arguments, 1));
+	        } else {
+	            self.resolve(value);
+	        }
+	    };
+	};
+
+	/**
+	 * @param resolver {Function} a function that returns nothing and accepts
+	 * the resolve, reject, and notify functions for a deferred.
+	 * @returns a promise that may be resolved with the given resolve and reject
+	 * functions, or rejected by a thrown exception in resolver
+	 */
+	Q.Promise = promise; // ES6
+	Q.promise = promise;
+	function promise(resolver) {
+	    if (typeof resolver !== "function") {
+	        throw new TypeError("resolver must be a function.");
+	    }
+	    var deferred = defer();
+	    try {
+	        resolver(deferred.resolve, deferred.reject, deferred.notify);
+	    } catch (reason) {
+	        deferred.reject(reason);
+	    }
+	    return deferred.promise;
+	}
+
+	promise.race = race; // ES6
+	promise.all = all; // ES6
+	promise.reject = reject; // ES6
+	promise.resolve = Q; // ES6
+
+	// XXX experimental.  This method is a way to denote that a local value is
+	// serializable and should be immediately dispatched to a remote upon request,
+	// instead of passing a reference.
+	Q.passByCopy = function (object) {
+	    //freeze(object);
+	    //passByCopies.set(object, true);
+	    return object;
+	};
+
+	Promise.prototype.passByCopy = function () {
+	    //freeze(object);
+	    //passByCopies.set(object, true);
+	    return this;
+	};
+
+	/**
+	 * If two promises eventually fulfill to the same value, promises that value,
+	 * but otherwise rejects.
+	 * @param x {Any*}
+	 * @param y {Any*}
+	 * @returns {Any*} a promise for x and y if they are the same, but a rejection
+	 * otherwise.
+	 *
+	 */
+	Q.join = function (x, y) {
+	    return Q(x).join(y);
+	};
+
+	Promise.prototype.join = function (that) {
+	    return Q([this, that]).spread(function (x, y) {
+	        if (x === y) {
+	            // TODO: "===" should be Object.is or equiv
+	            return x;
+	        } else {
+	            throw new Error("Can't join: not the same: " + x + " " + y);
+	        }
+	    });
+	};
+
+	/**
+	 * Returns a promise for the first of an array of promises to become settled.
+	 * @param answers {Array[Any*]} promises to race
+	 * @returns {Any*} the first promise to be settled
+	 */
+	Q.race = race;
+	function race(answerPs) {
+	    return promise(function (resolve, reject) {
+	        // Switch to this once we can assume at least ES5
+	        // answerPs.forEach(function (answerP) {
+	        //     Q(answerP).then(resolve, reject);
+	        // });
+	        // Use this in the meantime
+	        for (var i = 0, len = answerPs.length; i < len; i++) {
+	            Q(answerPs[i]).then(resolve, reject);
+	        }
+	    });
+	}
+
+	Promise.prototype.race = function () {
+	    return this.then(Q.race);
+	};
+
+	/**
+	 * Constructs a Promise with a promise descriptor object and optional fallback
+	 * function.  The descriptor contains methods like when(rejected), get(name),
+	 * set(name, value), post(name, args), and delete(name), which all
+	 * return either a value, a promise for a value, or a rejection.  The fallback
+	 * accepts the operation name, a resolver, and any further arguments that would
+	 * have been forwarded to the appropriate method above had a method been
+	 * provided with the proper name.  The API makes no guarantees about the nature
+	 * of the returned object, apart from that it is usable whereever promises are
+	 * bought and sold.
+	 */
+	Q.makePromise = Promise;
+	function Promise(descriptor, fallback, inspect) {
+	    if (fallback === void 0) {
+	        fallback = function (op) {
+	            return reject(new Error(
+	                "Promise does not support operation: " + op
+	            ));
+	        };
+	    }
+	    if (inspect === void 0) {
+	        inspect = function () {
+	            return {state: "unknown"};
+	        };
+	    }
+
+	    var promise = object_create(Promise.prototype);
+
+	    promise.promiseDispatch = function (resolve, op, args) {
+	        var result;
+	        try {
+	            if (descriptor[op]) {
+	                result = descriptor[op].apply(promise, args);
+	            } else {
+	                result = fallback.call(promise, op, args);
+	            }
+	        } catch (exception) {
+	            result = reject(exception);
+	        }
+	        if (resolve) {
+	            resolve(result);
+	        }
+	    };
+
+	    promise.inspect = inspect;
+
+	    // XXX deprecated `valueOf` and `exception` support
+	    if (inspect) {
+	        var inspected = inspect();
+	        if (inspected.state === "rejected") {
+	            promise.exception = inspected.reason;
+	        }
+
+	        promise.valueOf = function () {
+	            var inspected = inspect();
+	            if (inspected.state === "pending" ||
+	                inspected.state === "rejected") {
+	                return promise;
+	            }
+	            return inspected.value;
+	        };
+	    }
+
+	    return promise;
+	}
+
+	Promise.prototype.toString = function () {
+	    return "[object Promise]";
+	};
+
+	Promise.prototype.then = function (fulfilled, rejected, progressed) {
+	    var self = this;
+	    var deferred = defer();
+	    var done = false;   // ensure the untrusted promise makes at most a
+	                        // single call to one of the callbacks
+
+	    function _fulfilled(value) {
+	        try {
+	            return typeof fulfilled === "function" ? fulfilled(value) : value;
+	        } catch (exception) {
+	            return reject(exception);
+	        }
+	    }
+
+	    function _rejected(exception) {
+	        if (typeof rejected === "function") {
+	            makeStackTraceLong(exception, self);
+	            try {
+	                return rejected(exception);
+	            } catch (newException) {
+	                return reject(newException);
+	            }
+	        }
+	        return reject(exception);
+	    }
+
+	    function _progressed(value) {
+	        return typeof progressed === "function" ? progressed(value) : value;
+	    }
+
+	    Q.nextTick(function () {
+	        self.promiseDispatch(function (value) {
+	            if (done) {
+	                return;
+	            }
+	            done = true;
+
+	            deferred.resolve(_fulfilled(value));
+	        }, "when", [function (exception) {
+	            if (done) {
+	                return;
+	            }
+	            done = true;
+
+	            deferred.resolve(_rejected(exception));
+	        }]);
+	    });
+
+	    // Progress propagator need to be attached in the current tick.
+	    self.promiseDispatch(void 0, "when", [void 0, function (value) {
+	        var newValue;
+	        var threw = false;
+	        try {
+	            newValue = _progressed(value);
+	        } catch (e) {
+	            threw = true;
+	            if (Q.onerror) {
+	                Q.onerror(e);
+	            } else {
+	                throw e;
+	            }
+	        }
+
+	        if (!threw) {
+	            deferred.notify(newValue);
+	        }
+	    }]);
+
+	    return deferred.promise;
+	};
+
+	Q.tap = function (promise, callback) {
+	    return Q(promise).tap(callback);
+	};
+
+	/**
+	 * Works almost like "finally", but not called for rejections.
+	 * Original resolution value is passed through callback unaffected.
+	 * Callback may return a promise that will be awaited for.
+	 * @param {Function} callback
+	 * @returns {Q.Promise}
+	 * @example
+	 * doSomething()
+	 *   .then(...)
+	 *   .tap(console.log)
+	 *   .then(...);
+	 */
+	Promise.prototype.tap = function (callback) {
+	    callback = Q(callback);
+
+	    return this.then(function (value) {
+	        return callback.fcall(value).thenResolve(value);
+	    });
+	};
+
+	/**
+	 * Registers an observer on a promise.
+	 *
+	 * Guarantees:
+	 *
+	 * 1. that fulfilled and rejected will be called only once.
+	 * 2. that either the fulfilled callback or the rejected callback will be
+	 *    called, but not both.
+	 * 3. that fulfilled and rejected will not be called in this turn.
+	 *
+	 * @param value      promise or immediate reference to observe
+	 * @param fulfilled  function to be called with the fulfilled value
+	 * @param rejected   function to be called with the rejection exception
+	 * @param progressed function to be called on any progress notifications
+	 * @return promise for the return value from the invoked callback
+	 */
+	Q.when = when;
+	function when(value, fulfilled, rejected, progressed) {
+	    return Q(value).then(fulfilled, rejected, progressed);
+	}
+
+	Promise.prototype.thenResolve = function (value) {
+	    return this.then(function () { return value; });
+	};
+
+	Q.thenResolve = function (promise, value) {
+	    return Q(promise).thenResolve(value);
+	};
+
+	Promise.prototype.thenReject = function (reason) {
+	    return this.then(function () { throw reason; });
+	};
+
+	Q.thenReject = function (promise, reason) {
+	    return Q(promise).thenReject(reason);
+	};
+
+	/**
+	 * If an object is not a promise, it is as "near" as possible.
+	 * If a promise is rejected, it is as "near" as possible too.
+	 * If it’s a fulfilled promise, the fulfillment value is nearer.
+	 * If it’s a deferred promise and the deferred has been resolved, the
+	 * resolution is "nearer".
+	 * @param object
+	 * @returns most resolved (nearest) form of the object
+	 */
+
+	// XXX should we re-do this?
+	Q.nearer = nearer;
+	function nearer(value) {
+	    if (isPromise(value)) {
+	        var inspected = value.inspect();
+	        if (inspected.state === "fulfilled") {
+	            return inspected.value;
+	        }
+	    }
+	    return value;
+	}
+
+	/**
+	 * @returns whether the given object is a promise.
+	 * Otherwise it is a fulfilled value.
+	 */
+	Q.isPromise = isPromise;
+	function isPromise(object) {
+	    return object instanceof Promise;
+	}
+
+	Q.isPromiseAlike = isPromiseAlike;
+	function isPromiseAlike(object) {
+	    return isObject(object) && typeof object.then === "function";
+	}
+
+	/**
+	 * @returns whether the given object is a pending promise, meaning not
+	 * fulfilled or rejected.
+	 */
+	Q.isPending = isPending;
+	function isPending(object) {
+	    return isPromise(object) && object.inspect().state === "pending";
+	}
+
+	Promise.prototype.isPending = function () {
+	    return this.inspect().state === "pending";
+	};
+
+	/**
+	 * @returns whether the given object is a value or fulfilled
+	 * promise.
+	 */
+	Q.isFulfilled = isFulfilled;
+	function isFulfilled(object) {
+	    return !isPromise(object) || object.inspect().state === "fulfilled";
+	}
+
+	Promise.prototype.isFulfilled = function () {
+	    return this.inspect().state === "fulfilled";
+	};
+
+	/**
+	 * @returns whether the given object is a rejected promise.
+	 */
+	Q.isRejected = isRejected;
+	function isRejected(object) {
+	    return isPromise(object) && object.inspect().state === "rejected";
+	}
+
+	Promise.prototype.isRejected = function () {
+	    return this.inspect().state === "rejected";
+	};
+
+	//// BEGIN UNHANDLED REJECTION TRACKING
+
+	// This promise library consumes exceptions thrown in handlers so they can be
+	// handled by a subsequent promise.  The exceptions get added to this array when
+	// they are created, and removed when they are handled.  Note that in ES6 or
+	// shimmed environments, this would naturally be a `Set`.
+	var unhandledReasons = [];
+	var unhandledRejections = [];
+	var reportedUnhandledRejections = [];
+	var trackUnhandledRejections = true;
+
+	function resetUnhandledRejections() {
+	    unhandledReasons.length = 0;
+	    unhandledRejections.length = 0;
+
+	    if (!trackUnhandledRejections) {
+	        trackUnhandledRejections = true;
+	    }
+	}
+
+	function trackRejection(promise, reason) {
+	    if (!trackUnhandledRejections) {
+	        return;
+	    }
+	    if (typeof process === "object" && typeof process.emit === "function") {
+	        Q.nextTick.runAfter(function () {
+	            if (array_indexOf(unhandledRejections, promise) !== -1) {
+	                process.emit("unhandledRejection", reason, promise);
+	                reportedUnhandledRejections.push(promise);
+	            }
+	        });
+	    }
+
+	    unhandledRejections.push(promise);
+	    if (reason && typeof reason.stack !== "undefined") {
+	        unhandledReasons.push(reason.stack);
+	    } else {
+	        unhandledReasons.push("(no stack) " + reason);
+	    }
+	}
+
+	function untrackRejection(promise) {
+	    if (!trackUnhandledRejections) {
+	        return;
+	    }
+
+	    var at = array_indexOf(unhandledRejections, promise);
+	    if (at !== -1) {
+	        if (typeof process === "object" && typeof process.emit === "function") {
+	            Q.nextTick.runAfter(function () {
+	                var atReport = array_indexOf(reportedUnhandledRejections, promise);
+	                if (atReport !== -1) {
+	                    process.emit("rejectionHandled", unhandledReasons[at], promise);
+	                    reportedUnhandledRejections.splice(atReport, 1);
+	                }
+	            });
+	        }
+	        unhandledRejections.splice(at, 1);
+	        unhandledReasons.splice(at, 1);
+	    }
+	}
+
+	Q.resetUnhandledRejections = resetUnhandledRejections;
+
+	Q.getUnhandledReasons = function () {
+	    // Make a copy so that consumers can't interfere with our internal state.
+	    return unhandledReasons.slice();
+	};
+
+	Q.stopUnhandledRejectionTracking = function () {
+	    resetUnhandledRejections();
+	    trackUnhandledRejections = false;
+	};
+
+	resetUnhandledRejections();
+
+	//// END UNHANDLED REJECTION TRACKING
+
+	/**
+	 * Constructs a rejected promise.
+	 * @param reason value describing the failure
+	 */
+	Q.reject = reject;
+	function reject(reason) {
+	    var rejection = Promise({
+	        "when": function (rejected) {
+	            // note that the error has been handled
+	            if (rejected) {
+	                untrackRejection(this);
+	            }
+	            return rejected ? rejected(reason) : this;
+	        }
+	    }, function fallback() {
+	        return this;
+	    }, function inspect() {
+	        return { state: "rejected", reason: reason };
+	    });
+
+	    // Note that the reason has not been handled.
+	    trackRejection(rejection, reason);
+
+	    return rejection;
+	}
+
+	/**
+	 * Constructs a fulfilled promise for an immediate reference.
+	 * @param value immediate reference
+	 */
+	Q.fulfill = fulfill;
+	function fulfill(value) {
+	    return Promise({
+	        "when": function () {
+	            return value;
+	        },
+	        "get": function (name) {
+	            return value[name];
+	        },
+	        "set": function (name, rhs) {
+	            value[name] = rhs;
+	        },
+	        "delete": function (name) {
+	            delete value[name];
+	        },
+	        "post": function (name, args) {
+	            // Mark Miller proposes that post with no name should apply a
+	            // promised function.
+	            if (name === null || name === void 0) {
+	                return value.apply(void 0, args);
+	            } else {
+	                return value[name].apply(value, args);
+	            }
+	        },
+	        "apply": function (thisp, args) {
+	            return value.apply(thisp, args);
+	        },
+	        "keys": function () {
+	            return object_keys(value);
+	        }
+	    }, void 0, function inspect() {
+	        return { state: "fulfilled", value: value };
+	    });
+	}
+
+	/**
+	 * Converts thenables to Q promises.
+	 * @param promise thenable promise
+	 * @returns a Q promise
+	 */
+	function coerce(promise) {
+	    var deferred = defer();
+	    Q.nextTick(function () {
+	        try {
+	            promise.then(deferred.resolve, deferred.reject, deferred.notify);
+	        } catch (exception) {
+	            deferred.reject(exception);
+	        }
+	    });
+	    return deferred.promise;
+	}
+
+	/**
+	 * Annotates an object such that it will never be
+	 * transferred away from this process over any promise
+	 * communication channel.
+	 * @param object
+	 * @returns promise a wrapping of that object that
+	 * additionally responds to the "isDef" message
+	 * without a rejection.
+	 */
+	Q.master = master;
+	function master(object) {
+	    return Promise({
+	        "isDef": function () {}
+	    }, function fallback(op, args) {
+	        return dispatch(object, op, args);
+	    }, function () {
+	        return Q(object).inspect();
+	    });
+	}
+
+	/**
+	 * Spreads the values of a promised array of arguments into the
+	 * fulfillment callback.
+	 * @param fulfilled callback that receives variadic arguments from the
+	 * promised array
+	 * @param rejected callback that receives the exception if the promise
+	 * is rejected.
+	 * @returns a promise for the return value or thrown exception of
+	 * either callback.
+	 */
+	Q.spread = spread;
+	function spread(value, fulfilled, rejected) {
+	    return Q(value).spread(fulfilled, rejected);
+	}
+
+	Promise.prototype.spread = function (fulfilled, rejected) {
+	    return this.all().then(function (array) {
+	        return fulfilled.apply(void 0, array);
+	    }, rejected);
+	};
+
+	/**
+	 * The async function is a decorator for generator functions, turning
+	 * them into asynchronous generators.  Although generators are only part
+	 * of the newest ECMAScript 6 drafts, this code does not cause syntax
+	 * errors in older engines.  This code should continue to work and will
+	 * in fact improve over time as the language improves.
+	 *
+	 * ES6 generators are currently part of V8 version 3.19 with the
+	 * --harmony-generators runtime flag enabled.  SpiderMonkey has had them
+	 * for longer, but under an older Python-inspired form.  This function
+	 * works on both kinds of generators.
+	 *
+	 * Decorates a generator function such that:
+	 *  - it may yield promises
+	 *  - execution will continue when that promise is fulfilled
+	 *  - the value of the yield expression will be the fulfilled value
+	 *  - it returns a promise for the return value (when the generator
+	 *    stops iterating)
+	 *  - the decorated function returns a promise for the return value
+	 *    of the generator or the first rejected promise among those
+	 *    yielded.
+	 *  - if an error is thrown in the generator, it propagates through
+	 *    every following yield until it is caught, or until it escapes
+	 *    the generator function altogether, and is translated into a
+	 *    rejection for the promise returned by the decorated generator.
+	 */
+	Q.async = async;
+	function async(makeGenerator) {
+	    return function () {
+	        // when verb is "send", arg is a value
+	        // when verb is "throw", arg is an exception
+	        function continuer(verb, arg) {
+	            var result;
+
+	            // Until V8 3.19 / Chromium 29 is released, SpiderMonkey is the only
+	            // engine that has a deployed base of browsers that support generators.
+	            // However, SM's generators use the Python-inspired semantics of
+	            // outdated ES6 drafts.  We would like to support ES6, but we'd also
+	            // like to make it possible to use generators in deployed browsers, so
+	            // we also support Python-style generators.  At some point we can remove
+	            // this block.
+
+	            if (typeof StopIteration === "undefined") {
+	                // ES6 Generators
+	                try {
+	                    result = generator[verb](arg);
+	                } catch (exception) {
+	                    return reject(exception);
+	                }
+	                if (result.done) {
+	                    return Q(result.value);
+	                } else {
+	                    return when(result.value, callback, errback);
+	                }
+	            } else {
+	                // SpiderMonkey Generators
+	                // FIXME: Remove this case when SM does ES6 generators.
+	                try {
+	                    result = generator[verb](arg);
+	                } catch (exception) {
+	                    if (isStopIteration(exception)) {
+	                        return Q(exception.value);
+	                    } else {
+	                        return reject(exception);
+	                    }
+	                }
+	                return when(result, callback, errback);
+	            }
+	        }
+	        var generator = makeGenerator.apply(this, arguments);
+	        var callback = continuer.bind(continuer, "next");
+	        var errback = continuer.bind(continuer, "throw");
+	        return callback();
+	    };
+	}
+
+	/**
+	 * The spawn function is a small wrapper around async that immediately
+	 * calls the generator and also ends the promise chain, so that any
+	 * unhandled errors are thrown instead of forwarded to the error
+	 * handler. This is useful because it's extremely common to run
+	 * generators at the top-level to work with libraries.
+	 */
+	Q.spawn = spawn;
+	function spawn(makeGenerator) {
+	    Q.done(Q.async(makeGenerator)());
+	}
+
+	// FIXME: Remove this interface once ES6 generators are in SpiderMonkey.
+	/**
+	 * Throws a ReturnValue exception to stop an asynchronous generator.
+	 *
+	 * This interface is a stop-gap measure to support generator return
+	 * values in older Firefox/SpiderMonkey.  In browsers that support ES6
+	 * generators like Chromium 29, just use "return" in your generator
+	 * functions.
+	 *
+	 * @param value the return value for the surrounding generator
+	 * @throws ReturnValue exception with the value.
+	 * @example
+	 * // ES6 style
+	 * Q.async(function* () {
+	 *      var foo = yield getFooPromise();
+	 *      var bar = yield getBarPromise();
+	 *      return foo + bar;
+	 * })
+	 * // Older SpiderMonkey style
+	 * Q.async(function () {
+	 *      var foo = yield getFooPromise();
+	 *      var bar = yield getBarPromise();
+	 *      Q.return(foo + bar);
+	 * })
+	 */
+	Q["return"] = _return;
+	function _return(value) {
+	    throw new QReturnValue(value);
+	}
+
+	/**
+	 * The promised function decorator ensures that any promise arguments
+	 * are settled and passed as values (`this` is also settled and passed
+	 * as a value).  It will also ensure that the result of a function is
+	 * always a promise.
+	 *
+	 * @example
+	 * var add = Q.promised(function (a, b) {
+	 *     return a + b;
+	 * });
+	 * add(Q(a), Q(B));
+	 *
+	 * @param {function} callback The function to decorate
+	 * @returns {function} a function that has been decorated.
+	 */
+	Q.promised = promised;
+	function promised(callback) {
+	    return function () {
+	        return spread([this, all(arguments)], function (self, args) {
+	            return callback.apply(self, args);
+	        });
+	    };
+	}
+
+	/**
+	 * sends a message to a value in a future turn
+	 * @param object* the recipient
+	 * @param op the name of the message operation, e.g., "when",
+	 * @param args further arguments to be forwarded to the operation
+	 * @returns result {Promise} a promise for the result of the operation
+	 */
+	Q.dispatch = dispatch;
+	function dispatch(object, op, args) {
+	    return Q(object).dispatch(op, args);
+	}
+
+	Promise.prototype.dispatch = function (op, args) {
+	    var self = this;
+	    var deferred = defer();
+	    Q.nextTick(function () {
+	        self.promiseDispatch(deferred.resolve, op, args);
+	    });
+	    return deferred.promise;
+	};
+
+	/**
+	 * Gets the value of a property in a future turn.
+	 * @param object    promise or immediate reference for target object
+	 * @param name      name of property to get
+	 * @return promise for the property value
+	 */
+	Q.get = function (object, key) {
+	    return Q(object).dispatch("get", [key]);
+	};
+
+	Promise.prototype.get = function (key) {
+	    return this.dispatch("get", [key]);
+	};
+
+	/**
+	 * Sets the value of a property in a future turn.
+	 * @param object    promise or immediate reference for object object
+	 * @param name      name of property to set
+	 * @param value     new value of property
+	 * @return promise for the return value
+	 */
+	Q.set = function (object, key, value) {
+	    return Q(object).dispatch("set", [key, value]);
+	};
+
+	Promise.prototype.set = function (key, value) {
+	    return this.dispatch("set", [key, value]);
+	};
+
+	/**
+	 * Deletes a property in a future turn.
+	 * @param object    promise or immediate reference for target object
+	 * @param name      name of property to delete
+	 * @return promise for the return value
+	 */
+	Q.del = // XXX legacy
+	Q["delete"] = function (object, key) {
+	    return Q(object).dispatch("delete", [key]);
+	};
+
+	Promise.prototype.del = // XXX legacy
+	Promise.prototype["delete"] = function (key) {
+	    return this.dispatch("delete", [key]);
+	};
+
+	/**
+	 * Invokes a method in a future turn.
+	 * @param object    promise or immediate reference for target object
+	 * @param name      name of method to invoke
+	 * @param value     a value to post, typically an array of
+	 *                  invocation arguments for promises that
+	 *                  are ultimately backed with `resolve` values,
+	 *                  as opposed to those backed with URLs
+	 *                  wherein the posted value can be any
+	 *                  JSON serializable object.
+	 * @return promise for the return value
+	 */
+	// bound locally because it is used by other methods
+	Q.mapply = // XXX As proposed by "Redsandro"
+	Q.post = function (object, name, args) {
+	    return Q(object).dispatch("post", [name, args]);
+	};
+
+	Promise.prototype.mapply = // XXX As proposed by "Redsandro"
+	Promise.prototype.post = function (name, args) {
+	    return this.dispatch("post", [name, args]);
+	};
+
+	/**
+	 * Invokes a method in a future turn.
+	 * @param object    promise or immediate reference for target object
+	 * @param name      name of method to invoke
+	 * @param ...args   array of invocation arguments
+	 * @return promise for the return value
+	 */
+	Q.send = // XXX Mark Miller's proposed parlance
+	Q.mcall = // XXX As proposed by "Redsandro"
+	Q.invoke = function (object, name /*...args*/) {
+	    return Q(object).dispatch("post", [name, array_slice(arguments, 2)]);
+	};
+
+	Promise.prototype.send = // XXX Mark Miller's proposed parlance
+	Promise.prototype.mcall = // XXX As proposed by "Redsandro"
+	Promise.prototype.invoke = function (name /*...args*/) {
+	    return this.dispatch("post", [name, array_slice(arguments, 1)]);
+	};
+
+	/**
+	 * Applies the promised function in a future turn.
+	 * @param object    promise or immediate reference for target function
+	 * @param args      array of application arguments
+	 */
+	Q.fapply = function (object, args) {
+	    return Q(object).dispatch("apply", [void 0, args]);
+	};
+
+	Promise.prototype.fapply = function (args) {
+	    return this.dispatch("apply", [void 0, args]);
+	};
+
+	/**
+	 * Calls the promised function in a future turn.
+	 * @param object    promise or immediate reference for target function
+	 * @param ...args   array of application arguments
+	 */
+	Q["try"] =
+	Q.fcall = function (object /* ...args*/) {
+	    return Q(object).dispatch("apply", [void 0, array_slice(arguments, 1)]);
+	};
+
+	Promise.prototype.fcall = function (/*...args*/) {
+	    return this.dispatch("apply", [void 0, array_slice(arguments)]);
+	};
+
+	/**
+	 * Binds the promised function, transforming return values into a fulfilled
+	 * promise and thrown errors into a rejected one.
+	 * @param object    promise or immediate reference for target function
+	 * @param ...args   array of application arguments
+	 */
+	Q.fbind = function (object /*...args*/) {
+	    var promise = Q(object);
+	    var args = array_slice(arguments, 1);
+	    return function fbound() {
+	        return promise.dispatch("apply", [
+	            this,
+	            args.concat(array_slice(arguments))
+	        ]);
+	    };
+	};
+	Promise.prototype.fbind = function (/*...args*/) {
+	    var promise = this;
+	    var args = array_slice(arguments);
+	    return function fbound() {
+	        return promise.dispatch("apply", [
+	            this,
+	            args.concat(array_slice(arguments))
+	        ]);
+	    };
+	};
+
+	/**
+	 * Requests the names of the owned properties of a promised
+	 * object in a future turn.
+	 * @param object    promise or immediate reference for target object
+	 * @return promise for the keys of the eventually settled object
+	 */
+	Q.keys = function (object) {
+	    return Q(object).dispatch("keys", []);
+	};
+
+	Promise.prototype.keys = function () {
+	    return this.dispatch("keys", []);
+	};
+
+	/**
+	 * Turns an array of promises into a promise for an array.  If any of
+	 * the promises gets rejected, the whole array is rejected immediately.
+	 * @param {Array*} an array (or promise for an array) of values (or
+	 * promises for values)
+	 * @returns a promise for an array of the corresponding values
+	 */
+	// By Mark Miller
+	// http://wiki.ecmascript.org/doku.php?id=strawman:concurrency&rev=1308776521#allfulfilled
+	Q.all = all;
+	function all(promises) {
+	    return when(promises, function (promises) {
+	        var pendingCount = 0;
+	        var deferred = defer();
+	        array_reduce(promises, function (undefined, promise, index) {
+	            var snapshot;
+	            if (
+	                isPromise(promise) &&
+	                (snapshot = promise.inspect()).state === "fulfilled"
+	            ) {
+	                promises[index] = snapshot.value;
+	            } else {
+	                ++pendingCount;
+	                when(
+	                    promise,
+	                    function (value) {
+	                        promises[index] = value;
+	                        if (--pendingCount === 0) {
+	                            deferred.resolve(promises);
+	                        }
+	                    },
+	                    deferred.reject,
+	                    function (progress) {
+	                        deferred.notify({ index: index, value: progress });
+	                    }
+	                );
+	            }
+	        }, void 0);
+	        if (pendingCount === 0) {
+	            deferred.resolve(promises);
+	        }
+	        return deferred.promise;
+	    });
+	}
+
+	Promise.prototype.all = function () {
+	    return all(this);
+	};
+
+	/**
+	 * Returns the first resolved promise of an array. Prior rejected promises are
+	 * ignored.  Rejects only if all promises are rejected.
+	 * @param {Array*} an array containing values or promises for values
+	 * @returns a promise fulfilled with the value of the first resolved promise,
+	 * or a rejected promise if all promises are rejected.
+	 */
+	Q.any = any;
+
+	function any(promises) {
+	    if (promises.length === 0) {
+	        return Q.resolve();
+	    }
+
+	    var deferred = Q.defer();
+	    var pendingCount = 0;
+	    array_reduce(promises, function (prev, current, index) {
+	        var promise = promises[index];
+
+	        pendingCount++;
+
+	        when(promise, onFulfilled, onRejected, onProgress);
+	        function onFulfilled(result) {
+	            deferred.resolve(result);
+	        }
+	        function onRejected() {
+	            pendingCount--;
+	            if (pendingCount === 0) {
+	                deferred.reject(new Error(
+	                    "Can't get fulfillment value from any promise, all " +
+	                    "promises were rejected."
+	                ));
+	            }
+	        }
+	        function onProgress(progress) {
+	            deferred.notify({
+	                index: index,
+	                value: progress
+	            });
+	        }
+	    }, undefined);
+
+	    return deferred.promise;
+	}
+
+	Promise.prototype.any = function () {
+	    return any(this);
+	};
+
+	/**
+	 * Waits for all promises to be settled, either fulfilled or
+	 * rejected.  This is distinct from `all` since that would stop
+	 * waiting at the first rejection.  The promise returned by
+	 * `allResolved` will never be rejected.
+	 * @param promises a promise for an array (or an array) of promises
+	 * (or values)
+	 * @return a promise for an array of promises
+	 */
+	Q.allResolved = deprecate(allResolved, "allResolved", "allSettled");
+	function allResolved(promises) {
+	    return when(promises, function (promises) {
+	        promises = array_map(promises, Q);
+	        return when(all(array_map(promises, function (promise) {
+	            return when(promise, noop, noop);
+	        })), function () {
+	            return promises;
+	        });
+	    });
+	}
+
+	Promise.prototype.allResolved = function () {
+	    return allResolved(this);
+	};
+
+	/**
+	 * @see Promise#allSettled
+	 */
+	Q.allSettled = allSettled;
+	function allSettled(promises) {
+	    return Q(promises).allSettled();
+	}
+
+	/**
+	 * Turns an array of promises into a promise for an array of their states (as
+	 * returned by `inspect`) when they have all settled.
+	 * @param {Array[Any*]} values an array (or promise for an array) of values (or
+	 * promises for values)
+	 * @returns {Array[State]} an array of states for the respective values.
+	 */
+	Promise.prototype.allSettled = function () {
+	    return this.then(function (promises) {
+	        return all(array_map(promises, function (promise) {
+	            promise = Q(promise);
+	            function regardless() {
+	                return promise.inspect();
+	            }
+	            return promise.then(regardless, regardless);
+	        }));
+	    });
+	};
+
+	/**
+	 * Captures the failure of a promise, giving an oportunity to recover
+	 * with a callback.  If the given promise is fulfilled, the returned
+	 * promise is fulfilled.
+	 * @param {Any*} promise for something
+	 * @param {Function} callback to fulfill the returned promise if the
+	 * given promise is rejected
+	 * @returns a promise for the return value of the callback
+	 */
+	Q.fail = // XXX legacy
+	Q["catch"] = function (object, rejected) {
+	    return Q(object).then(void 0, rejected);
+	};
+
+	Promise.prototype.fail = // XXX legacy
+	Promise.prototype["catch"] = function (rejected) {
+	    return this.then(void 0, rejected);
+	};
+
+	/**
+	 * Attaches a listener that can respond to progress notifications from a
+	 * promise's originating deferred. This listener receives the exact arguments
+	 * passed to ``deferred.notify``.
+	 * @param {Any*} promise for something
+	 * @param {Function} callback to receive any progress notifications
+	 * @returns the given promise, unchanged
+	 */
+	Q.progress = progress;
+	function progress(object, progressed) {
+	    return Q(object).then(void 0, void 0, progressed);
+	}
+
+	Promise.prototype.progress = function (progressed) {
+	    return this.then(void 0, void 0, progressed);
+	};
+
+	/**
+	 * Provides an opportunity to observe the settling of a promise,
+	 * regardless of whether the promise is fulfilled or rejected.  Forwards
+	 * the resolution to the returned promise when the callback is done.
+	 * The callback can return a promise to defer completion.
+	 * @param {Any*} promise
+	 * @param {Function} callback to observe the resolution of the given
+	 * promise, takes no arguments.
+	 * @returns a promise for the resolution of the given promise when
+	 * ``fin`` is done.
+	 */
+	Q.fin = // XXX legacy
+	Q["finally"] = function (object, callback) {
+	    return Q(object)["finally"](callback);
+	};
+
+	Promise.prototype.fin = // XXX legacy
+	Promise.prototype["finally"] = function (callback) {
+	    callback = Q(callback);
+	    return this.then(function (value) {
+	        return callback.fcall().then(function () {
+	            return value;
+	        });
+	    }, function (reason) {
+	        // TODO attempt to recycle the rejection with "this".
+	        return callback.fcall().then(function () {
+	            throw reason;
+	        });
+	    });
+	};
+
+	/**
+	 * Terminates a chain of promises, forcing rejections to be
+	 * thrown as exceptions.
+	 * @param {Any*} promise at the end of a chain of promises
+	 * @returns nothing
+	 */
+	Q.done = function (object, fulfilled, rejected, progress) {
+	    return Q(object).done(fulfilled, rejected, progress);
+	};
+
+	Promise.prototype.done = function (fulfilled, rejected, progress) {
+	    var onUnhandledError = function (error) {
+	        // forward to a future turn so that ``when``
+	        // does not catch it and turn it into a rejection.
+	        Q.nextTick(function () {
+	            makeStackTraceLong(error, promise);
+	            if (Q.onerror) {
+	                Q.onerror(error);
+	            } else {
+	                throw error;
+	            }
+	        });
+	    };
+
+	    // Avoid unnecessary `nextTick`ing via an unnecessary `when`.
+	    var promise = fulfilled || rejected || progress ?
+	        this.then(fulfilled, rejected, progress) :
+	        this;
+
+	    if (typeof process === "object" && process && process.domain) {
+	        onUnhandledError = process.domain.bind(onUnhandledError);
+	    }
+
+	    promise.then(void 0, onUnhandledError);
+	};
+
+	/**
+	 * Causes a promise to be rejected if it does not get fulfilled before
+	 * some milliseconds time out.
+	 * @param {Any*} promise
+	 * @param {Number} milliseconds timeout
+	 * @param {Any*} custom error message or Error object (optional)
+	 * @returns a promise for the resolution of the given promise if it is
+	 * fulfilled before the timeout, otherwise rejected.
+	 */
+	Q.timeout = function (object, ms, error) {
+	    return Q(object).timeout(ms, error);
+	};
+
+	Promise.prototype.timeout = function (ms, error) {
+	    var deferred = defer();
+	    var timeoutId = setTimeout(function () {
+	        if (!error || "string" === typeof error) {
+	            error = new Error(error || "Timed out after " + ms + " ms");
+	            error.code = "ETIMEDOUT";
+	        }
+	        deferred.reject(error);
+	    }, ms);
+
+	    this.then(function (value) {
+	        clearTimeout(timeoutId);
+	        deferred.resolve(value);
+	    }, function (exception) {
+	        clearTimeout(timeoutId);
+	        deferred.reject(exception);
+	    }, deferred.notify);
+
+	    return deferred.promise;
+	};
+
+	/**
+	 * Returns a promise for the given value (or promised value), some
+	 * milliseconds after it resolved. Passes rejections immediately.
+	 * @param {Any*} promise
+	 * @param {Number} milliseconds
+	 * @returns a promise for the resolution of the given promise after milliseconds
+	 * time has elapsed since the resolution of the given promise.
+	 * If the given promise rejects, that is passed immediately.
+	 */
+	Q.delay = function (object, timeout) {
+	    if (timeout === void 0) {
+	        timeout = object;
+	        object = void 0;
+	    }
+	    return Q(object).delay(timeout);
+	};
+
+	Promise.prototype.delay = function (timeout) {
+	    return this.then(function (value) {
+	        var deferred = defer();
+	        setTimeout(function () {
+	            deferred.resolve(value);
+	        }, timeout);
+	        return deferred.promise;
+	    });
+	};
+
+	/**
+	 * Passes a continuation to a Node function, which is called with the given
+	 * arguments provided as an array, and returns a promise.
+	 *
+	 *      Q.nfapply(FS.readFile, [__filename])
+	 *      .then(function (content) {
+	 *      })
+	 *
+	 */
+	Q.nfapply = function (callback, args) {
+	    return Q(callback).nfapply(args);
+	};
+
+	Promise.prototype.nfapply = function (args) {
+	    var deferred = defer();
+	    var nodeArgs = array_slice(args);
+	    nodeArgs.push(deferred.makeNodeResolver());
+	    this.fapply(nodeArgs).fail(deferred.reject);
+	    return deferred.promise;
+	};
+
+	/**
+	 * Passes a continuation to a Node function, which is called with the given
+	 * arguments provided individually, and returns a promise.
+	 * @example
+	 * Q.nfcall(FS.readFile, __filename)
+	 * .then(function (content) {
+	 * })
+	 *
+	 */
+	Q.nfcall = function (callback /*...args*/) {
+	    var args = array_slice(arguments, 1);
+	    return Q(callback).nfapply(args);
+	};
+
+	Promise.prototype.nfcall = function (/*...args*/) {
+	    var nodeArgs = array_slice(arguments);
+	    var deferred = defer();
+	    nodeArgs.push(deferred.makeNodeResolver());
+	    this.fapply(nodeArgs).fail(deferred.reject);
+	    return deferred.promise;
+	};
+
+	/**
+	 * Wraps a NodeJS continuation passing function and returns an equivalent
+	 * version that returns a promise.
+	 * @example
+	 * Q.nfbind(FS.readFile, __filename)("utf-8")
+	 * .then(console.log)
+	 * .done()
+	 */
+	Q.nfbind =
+	Q.denodeify = function (callback /*...args*/) {
+	    var baseArgs = array_slice(arguments, 1);
+	    return function () {
+	        var nodeArgs = baseArgs.concat(array_slice(arguments));
+	        var deferred = defer();
+	        nodeArgs.push(deferred.makeNodeResolver());
+	        Q(callback).fapply(nodeArgs).fail(deferred.reject);
+	        return deferred.promise;
+	    };
+	};
+
+	Promise.prototype.nfbind =
+	Promise.prototype.denodeify = function (/*...args*/) {
+	    var args = array_slice(arguments);
+	    args.unshift(this);
+	    return Q.denodeify.apply(void 0, args);
+	};
+
+	Q.nbind = function (callback, thisp /*...args*/) {
+	    var baseArgs = array_slice(arguments, 2);
+	    return function () {
+	        var nodeArgs = baseArgs.concat(array_slice(arguments));
+	        var deferred = defer();
+	        nodeArgs.push(deferred.makeNodeResolver());
+	        function bound() {
+	            return callback.apply(thisp, arguments);
+	        }
+	        Q(bound).fapply(nodeArgs).fail(deferred.reject);
+	        return deferred.promise;
+	    };
+	};
+
+	Promise.prototype.nbind = function (/*thisp, ...args*/) {
+	    var args = array_slice(arguments, 0);
+	    args.unshift(this);
+	    return Q.nbind.apply(void 0, args);
+	};
+
+	/**
+	 * Calls a method of a Node-style object that accepts a Node-style
+	 * callback with a given array of arguments, plus a provided callback.
+	 * @param object an object that has the named method
+	 * @param {String} name name of the method of object
+	 * @param {Array} args arguments to pass to the method; the callback
+	 * will be provided by Q and appended to these arguments.
+	 * @returns a promise for the value or error
+	 */
+	Q.nmapply = // XXX As proposed by "Redsandro"
+	Q.npost = function (object, name, args) {
+	    return Q(object).npost(name, args);
+	};
+
+	Promise.prototype.nmapply = // XXX As proposed by "Redsandro"
+	Promise.prototype.npost = function (name, args) {
+	    var nodeArgs = array_slice(args || []);
+	    var deferred = defer();
+	    nodeArgs.push(deferred.makeNodeResolver());
+	    this.dispatch("post", [name, nodeArgs]).fail(deferred.reject);
+	    return deferred.promise;
+	};
+
+	/**
+	 * Calls a method of a Node-style object that accepts a Node-style
+	 * callback, forwarding the given variadic arguments, plus a provided
+	 * callback argument.
+	 * @param object an object that has the named method
+	 * @param {String} name name of the method of object
+	 * @param ...args arguments to pass to the method; the callback will
+	 * be provided by Q and appended to these arguments.
+	 * @returns a promise for the value or error
+	 */
+	Q.nsend = // XXX Based on Mark Miller's proposed "send"
+	Q.nmcall = // XXX Based on "Redsandro's" proposal
+	Q.ninvoke = function (object, name /*...args*/) {
+	    var nodeArgs = array_slice(arguments, 2);
+	    var deferred = defer();
+	    nodeArgs.push(deferred.makeNodeResolver());
+	    Q(object).dispatch("post", [name, nodeArgs]).fail(deferred.reject);
+	    return deferred.promise;
+	};
+
+	Promise.prototype.nsend = // XXX Based on Mark Miller's proposed "send"
+	Promise.prototype.nmcall = // XXX Based on "Redsandro's" proposal
+	Promise.prototype.ninvoke = function (name /*...args*/) {
+	    var nodeArgs = array_slice(arguments, 1);
+	    var deferred = defer();
+	    nodeArgs.push(deferred.makeNodeResolver());
+	    this.dispatch("post", [name, nodeArgs]).fail(deferred.reject);
+	    return deferred.promise;
+	};
+
+	/**
+	 * If a function would like to support both Node continuation-passing-style and
+	 * promise-returning-style, it can end its internal promise chain with
+	 * `nodeify(nodeback)`, forwarding the optional nodeback argument.  If the user
+	 * elects to use a nodeback, the result will be sent there.  If they do not
+	 * pass a nodeback, they will receive the result promise.
+	 * @param object a result (or a promise for a result)
+	 * @param {Function} nodeback a Node.js-style callback
+	 * @returns either the promise or nothing
+	 */
+	Q.nodeify = nodeify;
+	function nodeify(object, nodeback) {
+	    return Q(object).nodeify(nodeback);
+	}
+
+	Promise.prototype.nodeify = function (nodeback) {
+	    if (nodeback) {
+	        this.then(function (value) {
+	            Q.nextTick(function () {
+	                nodeback(null, value);
+	            });
+	        }, function (error) {
+	            Q.nextTick(function () {
+	                nodeback(error);
+	            });
+	        });
+	    } else {
+	        return this;
+	    }
+	};
+
+	// All code before this point will be filtered from stack traces.
+	var qEndingLine = captureLine();
+
+	return Q;
+
+	});
+
+
+/***/ },
+/* 9 */
+/***/ function(module, exports, __webpack_require__) {
+
+	/*
+	 * Copyright 2015, Digium, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under The MIT License found in the
+	 * LICENSE file in the root directory of this source tree.
+	 *
+	 * For all details and documentation:  https://www.respoke.io
+	 */
+
+	var Q = __webpack_require__(8);
+	var respoke = __webpack_require__(1);
+	var log = respoke.log;
+
+	/**
+	 * `respoke.Client` is the top-level interface to the API. Interacting with Respoke should be done using
+	 * a `respoke.Client` instance.
+	 *
+	 * There are two ways to get a client:
+	 *
+	 *      var client = respoke.createClient(clientParams);
+	 *      // . . . set stuff up, then . . .
+	 *      client.connect(connectParams);
+	 *
+	 * or
+	 *
+	 *      // creates client and connects to Respoke all at once
+	 *      var client = respoke.connect(allParams);
+	 *
+	 * A client does the following things:
+	 *
+	 * 1. authentication with the Respoke API
+	 * 1. receives server-side app-specific information
+	 * 1. tracks connections and presence
+	 * 1. provides methods to get and interact with tracked entities (like groups and endpoints)
+	 * 1. stores default settings for calls and direct connections
+	 * 1. automatically reconnects to the API when network activity is lost*
+	 *
+	 * *If `developmentMode` is set to true. If not using `developmentMode`, disable automatic
+	 * reconnect by sending `reconnect: false` and listening to the Client's disconnect event
+	 * to fetch a new brokered auth token, then call `client.connect()` with the new token.
+	 *
+	 * @class respoke.Client
+	 * @constructor
+	 * @augments respoke.EventEmitter
+	 * @param {object} params
+	 * @param {string} [params.appId] - The ID of your Respoke app. This must be passed either to
+	 * respoke.connect, respoke.createClient, or to client.connect.
+	 * @param {string} [params.token] - The endpoint's authentication token.
+	 * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
+	 * endpoint. This is only used when `developmentMode` is set to `true`.
+	 * @param {boolean} [params.developmentMode=false] - Indication to obtain an authentication token from the service.
+	 * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
+	 * operation and will limit the services you will be able to use.
+	 * @param {string|number|object|Array} [params.presence=unavailable] The initial presence to set once connected.
+	 * @param {boolean} [params.reconnect=true] - Whether or not to automatically reconnect to the Respoke service
+	 * when a disconnect occurs.
+	 * @proprety {number} [connectTimeoutMillis=10000] - Number of milliseconds before considering the connect operation timed out.
+	 * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
+	 * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves a group.
+	 * @param {respoke.Client.onClientMessage} [params.onMessage] - Callback for when any message is received
+	 * from anywhere on the system.
+	 * @param {respoke.Client.onConnect} [params.onConnect] - Callback for Client connect.
+	 * @param {respoke.Client.onDisconnect} [params.onDisconnect] - Callback for Client disconnect.
+	 * @param {respoke.Client.onReconnect} [params.onReconnect] - Callback for Client reconnect.
+	 * @param {respoke.Client.onCall} [params.onCall] - Callback for when this client's user receives a call.
+	 * @param {respoke.Client.onDirectConnection} [params.onDirectConnection] - Callback for when this client's user
+	 * receives a request for a direct connection.
+	 * @returns {respoke.Client}
+	 */
+	module.exports = function (params) {
+	    "use strict";
+	    params = params || {};
+	    /**
+	     * @memberof! respoke.Client
+	     * @name instanceId
+	     * @private
+	     * @type {string}
+	     */
+	    var instanceId = params.instanceId || respoke.makeGUID();
+	    params.instanceId = instanceId;
+	    var that = respoke.EventEmitter(params);
+	    respoke.instances[instanceId] = that;
+	    delete that.instanceId;
+	    that.connectTries = 0;
+	    /**
+	     * A name to identify this class
+	     * @memberof! respoke.Client
+	     * @name className
+	     * @type {string}
+	     */
+	    that.className = 'respoke.Client';
+	    /**
+	     * @memberof! respoke.Client
+	     * @name host
+	     * @type {string}
+	     * @private
+	     */
+	    var host = window.location.hostname;
+	    /**
+	     * @memberof! respoke.Client
+	     * @name port
+	     * @type {number}
+	     * @private
+	     */
+	    var port = window.location.port;
+
+	    /**
+	     * A container for baseURL, token, and appId so they won't be accidentally viewable in any JavaScript debugger.
+	     * @memberof! respoke.Client
+	     * @name clientSettings
+	     * @type {object}
+	     * @private
+	     * @property {string} [baseURL] - the URL of the cloud infrastructure's REST API.
+	     * @property {string} [token] - The endpoint's authentication token.
+	     * @property {string} [appId] - The id of your Respoke app.
+	     * @property {string} [endpointId] - An identifier to use when creating an authentication token for this
+	     * endpoint. This is only used when `developmentMode` is set to `true`.
+	     * @property {boolean} [developmentMode=false] - Indication to obtain an authentication token from the service.
+	     * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
+	     * operation and will limit the services you will be able to use.
+	     * @property {boolean} [reconnect=false] - Whether or not to automatically reconnect to the Respoke service
+	     * when a disconnect occurs.
+	     * @proprety {number} [connectTimeoutMillis=10000] - Number of milliseconds before considering the connect
+	     * timed out.
+	     * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
+	     * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves a group.
+	     * @property {respoke.Client.onClientMessage} [onMessage] - Callback for when any message is received
+	     * from anywhere on the system.
+	     * @property {respoke.Client.onConnect} [onConnect] - Callback for Client connect.
+	     * @property {respoke.Client.onDisconnect} [onDisconnect] - Callback for Client disconnect.
+	     * @property {respoke.Client.onReconnect} [onReconnect] - Callback for Client reconnect. Not Implemented.
+	     * @property {respoke.Client.onCall} [onCall] - Callback for when this client receives a call.
+	     * @property {respoke.Client.onDirectConnection} [onDirectConnection] - Callback for when this client
+	     * receives a request for a direct connection.
+	     * @property {boolean} enableCallDebugReport=true - Upon finishing a call, should the client send debugging
+	     * information to the API? Defaults to `true`.
+	     */
+	    var clientSettings = that.clientSettings = {};
+
+	    delete that.appId;
+	    delete that.baseURL;
+	    delete that.developmentMode;
+	    delete that.token;
+	    delete that.resolveEndpointPresence;
+
+	    /**
+	     * Internal list of known groups.
+	     * @memberof! respoke.Client
+	     * @name groups
+	     * @type {Array<respoke.Group>}
+	     * @private
+	     */
+	    var groups = [];
+	    /**
+	     * Internal list of known endpoints.
+	     * @memberof! respoke.Client
+	     * @name endpoints
+	     * @type {Array<respoke.Endpoint>}
+	     * @private
+	     */
+	    var endpoints = [];
+	    /**
+	     * Array of calls in progress, made accessible for informational purposes only.
+	     * **Never modify this array directly.**
+	     *
+	     * @memberof! respoke.Client
+	     * @name calls
+	     * @type {array}
+	     */
+	    that.calls = [];
+	    log.debug("Client ID is ", instanceId);
+
+	    /**
+	     * @memberof! respoke.Client
+	     * @name signalingChannel
+	     * @type {respoke.SignalingChannel}
+	     * @private
+	     */
+	    that.signalingChannel = respoke.SignalingChannel({
+	        instanceId: instanceId,
+	        clientSettings: clientSettings
+	    });
+
+	    /**
+	     * Represents the presence status. Typically a string, but other types are supported.
+	     * Defaults to `'unavailable'`.
+	     *
+	     * **Do not modify this directly** - it won't update presence with Respoke. Use `setPresence()`.
+	     *
+	     * @memberof! respoke.Client
+	     * @name presence
+	     * @type {string|number|object|Array}
+	     */
+	    that.presence = params.presence || 'unavailable';
+
+	    /**
+	     * Deprecated: use endpoint.presence instead.
+	     *
+	     * Return the presence.
+	     * @memberof! respoke.Client
+	     * @deprecated
+	     * @name presence
+	     * @type {string|number|object|Array}
+	     */
+	    that.getPresence = function () {
+	        return that.presence;
+	    };
+
+	    /**
+	     * Save parameters of the constructor or client.connect() onto the clientSettings object
+	     * @memberof! respoke.Client
+	     * @method respoke.saveParameters
+	     * @param {object} params
+	     * @param {respoke.Client.connectSuccessHandler} [params.onSuccess] - Success handler for this invocation
+	     * of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @param {string} [params.appId] - The ID of your Respoke app. This must be passed either to
+	     * respoke.connect, respoke.createClient, or to client.connect.
+	     * @param {string} [params.token] - The endpoint's authentication token.
+	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
+	     * endpoint. This is only used when `developmentMode` is set to `true`.
+	     * @param {string|number|object|Array} [params.presence] The initial presence to set once connected.
+	     * @param {respoke.client.resolveEndpointPresence} [params.resolveEndpointPresence] An optional function for
+	     * resolving presence for an endpoint.  An endpoint can have multiple Connections this function will be used
+	     * to decide which Connection's presence gets precedence for the Endpoint.
+	     * @param {boolean} [params.developmentMode=false] - Indication to obtain an authentication token from the service.
+	     * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
+	     * operation and will limit the services you will be able to use.
+	     * @param {boolean} [params.reconnect=true] - Whether or not to automatically reconnect to the Respoke service
+	     * when a disconnect occurs.
+	     * @proprety {number} [paramsconnectTimeoutMillis=10000] - Number of milliseconds before considering the connect
+	     * timed out.
+	     * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
+	     * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves
+	     * a group.
+	     * @param {respoke.Client.onClientMessage} [params.onMessage] - Callback for when any message is
+	     * received from anywhere on the system.
+	     * @param {respoke.Client.onConnect} [params.onConnect] - Callback for Client connect.
+	     * @param {respoke.Client.onDisconnect} [params.onDisconnect] - Callback for Client disconnect.
+	     * @param {respoke.Client.onReconnect} [params.onReconnect] - Callback for Client reconnect. Not Implemented.
+	     * @param {respoke.Client.onCall} [params.onCall] - Callback for when this client receives a call.
+	     * @param {respoke.Client.onDirectConnection} [params.onDirectConnection] - Callback for when this
+	     * client receives a request for a direct connection.
+	     * @private
+	     */
+	    function saveParameters(params) {
+	        Object.keys(params).forEach(function eachParam(key) {
+	            if (['onSuccess', 'onError', 'reconnect', 'presence'].indexOf(key) === -1 && params[key] !== undefined) {
+	                clientSettings[key] = params[key];
+	            }
+	        });
+
+	        clientSettings.developmentMode = !!clientSettings.developmentMode;
+	        clientSettings.enableCallDebugReport = typeof clientSettings.enableCallDebugReport === 'boolean' ?
+	            clientSettings.enableCallDebugReport : true;
+
+	        if (typeof clientSettings.connectTimeoutMillis !== 'number') {
+	            clientSettings.connectTimeoutMillis = 10000;
+	        }
+
+	        if (typeof params.reconnect !== 'boolean') {
+	            clientSettings.reconnect = typeof clientSettings.developmentMode === 'boolean' ?
+	                clientSettings.developmentMode : false;
+	        } else {
+	            clientSettings.reconnect = !!params.reconnect;
+	        }
+	    }
+	    saveParameters(params);
+
+	    /**
+	     * Connect to the Respoke infrastructure and authenticate using `params.token`.
+	     *
+	     * After `connect`, the app auth session token is stored so it can be used in API requests.
+	     *
+	     * This method attaches quite a few event listeners for things like group joining and connection status changes.
+	     *
+	     * #### Usage
+	     *
+	     *      client.connect({
+	     *          appId: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX",
+	     *          token: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX", // if not developmentMode
+	     *          developmentMode: false || true,
+	     *          // if developmentMode, otherwise your server will set endpointId
+	     *          endpointId: "daveops"
+	     *      });
+	     *      client.listen("connect", function () { } );
+	     *
+	     *
+	     * If no `params.token` is given and `developmentMode` is set to true, it will attempt to obtain a token
+	     * automatically. You must set an `endpointId`.
+	     *
+	     *
+	     * #### App auth session token expiration
+	     *
+	     * If `params.reconnect` is set to true (which it is by default for `developmentMode`), the `client`
+	     * will attempt to keep reconnecting each time the app auth session expires.
+	     *
+	     * If not using `developmentMode`, automatic reconnect will be disabled. You will need to
+	     * listen to the Client's `disconnect` event to fetch a new brokered auth token and call
+	     * `client.connect()` with the new token.
+	     *
+	     *      client.listen('disconnect', function () {
+	     *
+	     *          // example method you implemented to get a new token from your server
+	     *          myServer.getNewRespokeAccessToken(function (newToken) {
+	     *              // reconnect with respoke.Client
+	     *              client.connect({ token: newToken });
+	     *          });
+	     *
+	     *      });
+	     *
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.connect
+	     * @param {object} params
+	     * @param {respoke.Client.connectSuccessHandler} [params.onSuccess] - Success handler for this invocation
+	     * of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @param {string} [params.appId] - The ID of your Respoke app. This must be passed either to
+	     * respoke.connect, respoke.createClient, or to client.connect.
+	     * @param {string} [params.token] - The endpoint's authentication token.
+	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
+	     * endpoint. This is only used when `developmentMode` is set to `true`.
+	     * @param {string|number|object|Array} [params.presence] The initial presence to set once connected.
+	     * @param {respoke.client.resolveEndpointPresence} [params.resolveEndpointPresence] An optional function for
+	     * resolving presence for an endpoint.  An endpoint can have multiple Connections this function will be used
+	     * to decide which Connection's presence gets precedence for the Endpoint.
+	     * @param {boolean} [params.developmentMode=false] - Indication to obtain an authentication token from the service.
+	     * Note: Your app must be in developer mode to use this feature. This is not intended as a long-term mode of
+	     * operation and will limit the services you will be able to use.
+	     * @param {boolean} [params.reconnect=true] - Whether or not to automatically reconnect to the Respoke service
+	     * when a disconnect occurs.
+	     * @proprety {number} [connectTimeoutMillis=10000] - Number of milliseconds before considering the connect
+	     * timed out.
+	     * @param {respoke.Client.onJoin} [params.onJoin] - Callback for when this client's endpoint joins a group.
+	     * @param {respoke.Client.onLeave} [params.onLeave] - Callback for when this client's endpoint leaves
+	     * a group.
+	     * @param {respoke.Client.onClientMessage} [params.onMessage] - Callback for when any message is
+	     * received from anywhere on the system.
+	     * @param {respoke.Client.onConnect} [params.onConnect] - Callback for Client connect.
+	     * @param {respoke.Client.onDisconnect} [params.onDisconnect] - Callback for Client disconnect.
+	     * @param {respoke.Client.onReconnect} [params.onReconnect] - Callback for Client reconnect. Not Implemented.
+	     * @param {respoke.Client.onCall} [params.onCall] - Callback for when this client receives a call.
+	     * @param {respoke.Client.onDirectConnection} [params.onDirectConnection] - Callback for when this
+	     * client receives a request for a direct connection.
+	     * @returns {Promise|undefined}
+	     * @fires respoke.Client#connect
+	     */
+	    that.connect = function (params) {
+	        var promise;
+	        var retVal;
+	        params = params || {};
+	        log.debug('Client.connect');
+	        that.connectTries += 1;
+
+	        saveParameters(params);
+	        that.presence = params.presence || that.presence;
+	        that.endpointId = clientSettings.endpointId;
+	        promise = actuallyConnect(params);
+	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
+	        promise.then(function successHandler() {
+	            /**
+	             * This event is fired the first time the library connects to the cloud infrastructure.
+	             * @event respoke.Client#connect
+	             * @type {respoke.Event}
+	             * @property {string} name - the event name.
+	             * @property {respoke.Client} target
+	             */
+	            that.fire('connect');
+	        });
+	        return retVal;
+	    };
+
+	    /**
+	     * This function contains the meat of the connection, the portions which can be repeated again on reconnect.
+	     *
+	     * When `reconnect` is true, this function will be added in an event listener to the Client#disconnect event.
+	     *
+	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.actuallyConnect
+	     * @private
+	     * @param {object} params
+	     * @param {connectSuccessHandler} [params.onSuccess] - Success handler for this invocation of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @returns {Promise|undefined}
+	     */
+	    function actuallyConnect(params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+
+	        if (!clientSettings.token &&
+	                (!clientSettings.appId || !clientSettings.endpointId || clientSettings.developmentMode !== true)) {
+	            deferred.reject(new Error("Must pass either endpointID & appId & developmentMode=true, or a token, " +
+	                "to client.connect()."));
+	            return deferred.promise;
+	        }
+
+	        that.signalingChannel.open({
+	            actuallyConnect: actuallyConnect,
+	            endpointId: that.endpointId,
+	            token: clientSettings.token
+	        }).then(function successHandler() {
+	            return that.signalingChannel.authenticate();
+	        }).done(function successHandler() {
+	            // set initial presence for the connection
+	            if (that.presence) {
+	                that.setPresence({presence: that.presence});
+	            }
+
+	            /*
+	             * These rely on the EventEmitter checking for duplicate event listeners in order for these
+	             * not to be duplicated on reconnect.
+	             */
+
+	            /**
+	             * This event provides notification for when an incoming call is being received.  If the user wishes
+	             * to allow the call, `evt.call.answer()`.
+	             * @event respoke.Client#call
+	             * @type {respoke.Event}
+	             * @property {respoke.Call} call
+	             * @property {respoke.Endpoint} endpoint
+	             * @property {string} name - The event name.
+	             * @property {respoke.Client} target
+	             */
+	            that.listen('call', clientSettings.onCall);
+	            /**
+	             * This event is fired when the local end of the directConnection is available. It still will not be
+	             * ready to send and receive messages until the 'open' event fires.
+	             * @event respoke.Client#direct-connection
+	             * @type {respoke.Event}
+	             * @property {respoke.DirectConnection} directConnection
+	             * @property {respoke.Endpoint} endpoint
+	             * @property {string} name - the event name.
+	             * @property {respoke.Call} target
+	             */
+	            that.listen('direct-connection', clientSettings.onDirectConnection);
+	            that.listen('join', clientSettings.onJoin);
+	            /**
+	             * This event is fired every time the client leaves a group.
+	             * @event respoke.Client#leave
+	             * @type {respoke.Event}
+	             * @property {respoke.Group} group
+	             * @property {string} name - the event name.
+	             */
+	            that.listen('leave', clientSettings.onLeave);
+	            /**
+	             * A generic message handler when a message was received by the client.
+	             *
+	             * @event respoke.Client#message
+	             * @type {respoke.Event}
+	             * @property {string} name - The event name.
+	             * @property {respoke.Endpoint} endpoint - If the message was private, this is the Endpoint who sent it.
+	             * @property {respoke.Group} group - If the message was to a group, this is the group.
+	             * @property {respoke.TextMessage} message - The generic message object.
+	             * @property {string} message.connectionId
+	             * @property {string} message.endpointId
+	             * @property {string} message.message - Message body text.
+	             * @property {respoke.Client} target
+	             */
+	            that.listen('message', clientSettings.onMessage);
+	            that.listen('connect', clientSettings.onConnect);
+	            /**
+	             * Client has disconnected from Respoke.
+	             *
+	             * @event respoke.Client#disconnect
+	             * @type {respoke.Event}
+	             * @property {string} name - The event name.
+	             * @property {respoke.Client} target
+	             */
+	            that.listen('disconnect', clientSettings.onDisconnect);
+	            that.listen('disconnect', function () {
+	                that.calls.forEach(function (call) {
+	                    call.hangup({signal: false});
+	                });
+	            }, true);
+	            /**
+	             * Client has reconnected to Respoke.
+	             *
+	             * @event respoke.Client#reconnect
+	             * @type {respoke.Event}
+	             * @property {string} name - The event name.
+	             * @property {respoke.Client} target
+	             */
+	            that.listen('reconnect', clientSettings.onReconnect);
+
+	            log.info('logged in as ' + that.endpointId, that);
+	            deferred.resolve();
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	            if (err.message && err.message.match(/Connection limit exceeded/)) {
+	                log.error(
+	                    'You have reached the connection limit on the account associated with this appId. ' +
+	                    'Please upgrade your account from the developer portal at https://portal.respoke.io ' +
+	                    'if you need more concurrent connections.', err);
+	            } else {
+	                log.error(err.message, err.stack);
+	            }
+	        });
+
+	        return deferred.promise;
+	    }
+
+	    /**
+	     * Disconnect from the Respoke infrastructure, leave all groups, invalidate the token, and disconnect the websocket.
+	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.disconnect
+	     * @returns {Promise|undefined}
+	     * @param {object} params
+	     * @param {disconnectSuccessHandler} [params.onSuccess] - Success handler for this invocation of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @fires respoke.Client#disconnect
+	     */
+	    that.disconnect = function (params) {
+	        // TODO: also call this on socket disconnect
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
+
+	        try {
+	            that.verifyConnected();
+	        } catch (e) {
+	            deferred.reject(e);
+	            return retVal;
+	        }
+
+	        var leaveGroups = groups.map(function eachGroup(group) {
+	            if (group.isJoined()) {
+	                return group.leave();
+	            }
+	        });
+
+	        Q.all(leaveGroups).fin(function successHandler() {
+	            return that.signalingChannel.close();
+	        }).fin(function finallyHandler() {
+	            that.presence = 'unavailable';
+	            endpoints = [];
+	            groups = [];
+	            /**
+	             * This event is fired when the library has disconnected from the cloud infrastructure.
+	             * @event respoke.Client#disconnect
+	             * @property {string} name - the event name.
+	             * @property {respoke.Client} target
+	             */
+	            that.fire('disconnect');
+	            deferred.resolve();
+	        }).done();
+
+	        return retVal;
+	    };
+
+	    /**
+	     * Set the presence for this client.
+	     *
+	     * The value of presence can be a string, number, object, or array - in any format -
+	     * depending on the needs of your application. The only requirement is that
+	     * `JSON.stringify()` must work (no circular references).
+	     *
+	     *      var myPresence = 'At lunch'
+	     *                      || 4
+	     *                      || { status: 'Away', message: 'At lunch' }
+	     *                      || ['Away', 'At lunch'];
+	     *
+	     *      client.setPresence({
+	     *          presence: myPresence,
+	     *          onSuccess: function (evt) {
+	     *              // successfully updated my presence
+	     *          }
+	     *      });
+	     *
+	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
+	     *
+	     * ### Resolving presence
+	     *
+	     * When not using a custom endpoint presence resolver
+	     * (see `respoke.createClient({ resolveEndpointPresence: <Function> })`)
+	     * these are the supported presence values. Values not below will be put at the end of the
+	     * list when resolving an endpoint's presence across the presence of its connections.
+	     *
+	     * ```
+	     * ['chat', 'available', 'away', 'dnd', 'xa', 'unavailable']
+	     * ```
+	     *
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.setPresence
+	     * @param {object} params
+	     * @param {string|number|object|array} params.presence
+	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of
+	     * this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @return {Promise|undefined}
+	     */
+	    that.setPresence = function (params) {
+	        var promise;
+	        var retVal;
+	        params = params || {};
+	        params.presence = params.presence || 'available';
+
+	        try {
+	            that.verifyConnected();
+	        } catch (e) {
+	            promise = Q.reject(e);
+	            return respoke.handlePromise(promise, params.onSuccess, params.onError);
+	        }
+
+	        log.info('sending my presence update ' + params.presence);
+
+	        promise = that.signalingChannel.sendPresence({
+	            presence: params.presence
+	        }).then(function successHandler(p) {
+	            that.presence = params.presence;
+
+	            /**
+	             * This event indicates that the presence for this endpoint has been updated.
+	             * @event respoke.Client#presence
+	             * @type {respoke.Event}
+	             * @property {string|number|object|Array} presence
+	             * @property {string} name - the event name.
+	             * @property {respoke.Client} target
+	             */
+	            that.fire('presence', {
+	                presence: that.presence
+	            });
+	        });
+	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
+	        return retVal;
+	    };
+
+	    /**
+	     * Get the Call with the endpoint specified.
+	     *
+	     *     // hang up on chad
+	     *     var call = client.getCall({
+	     *         endpointId: 'chad'
+	     *     });
+	     *
+	     *     if (call) {
+	     *         call.hangup()
+	     *     }
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.getCall
+	     * @param {object} params
+	     * @param {string} [params.id] - Call ID.
+	     * @param {string} [params.endpointId] - Endpoint ID. Warning: If you pass only the endpointId, this method
+	     * will just return the first call that matches. If you are placing multiple calls to the same endpoint,
+	     * pass in the call ID, too.
+	     * @arg {boolean} [params.create] - whether or not to create a new call if the specified endpointId isn't found
+	     * @arg {string} [params.fromType] - fromType from the signal, tells us if this is a SIP or DID call.
+	     * @arg {string} [params.target] - target from the signal, tells us if this is a screenshare or conference call.
+	     * @returns {respoke.Call}
+	     */
+	    that.getCall = function (params) {
+	        var call = null;
+	        var methods = {
+	            screenshare: "startScreenShare",
+	            did: "startPhoneCall",
+	            web: "startCall",
+	            sip: "startSIPCall",
+	            conference: "joinConference"
+	        };
+	        var callParams = {};
+	        params.fromType = params.type || "web";
+	        var switchType = params.type;
+
+	        that.calls.every(function findCall(one) {
+	            if (params.id && one.id === params.id) {
+	                call = one;
+	                return false;
+	            }
+
+	            if (!params.id && params.endpointId && one.remoteEndpoint.id === params.endpointId) {
+	                call = one;
+	                return false;
+	            }
+	            return true;
+	        });
+
+	        if (call || params.create !== true) {
+	            return call;
+	        }
+
+	        callParams.id = params.id;
+	        callParams.caller = false;
+	        callParams.fromType = "web";
+	        callParams.callerId = params.callerId;
+	        callParams.target = params.target;
+
+	        if (params.target === "conference") {
+	            callParams.id = params.conferenceId;
+	            switchType = params.target;
+	        } else if (params.target === "screenshare") {
+	            switchType = params.target;
+	        }
+
+	        switch (switchType) {
+	            case "screenshare":
+	            case "web":
+	                callParams.toType = "web"; // overwrite "screenshare"
+	                callParams.endpointId = params.endpointId;
+	                break;
+	            case "did":
+	                callParams.number = params.endpointId;
+	                callParams.toType = "did";
+	                break;
+	            case "sip":
+	                callParams.uri = params.endpointId;
+	                callParams.toType = "sip";
+	                break;
+	        }
+
+	        try {
+	            call = that[methods[params.type]](callParams);
+	        } catch (e) {
+	            log.error("Couldn't create Call.", e.message, e.stack);
+	        }
+	        return call;
+	    };
+
+	    /**
+	     * Add the call to internal record-keeping.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.addCall
+	     * @param {object} evt
+	     * @param {respoke.Call} evt.call
+	     * @param {respoke.Endpoint} evt.endpoint
+	     * @private
+	     */
+	    function addCall(evt) {
+	        log.debug('addCall');
+	        if (!evt.call) {
+	            throw new Error("Can't add call without a call parameter.");
+	        }
+	        if (that.calls.indexOf(evt.call) === -1) {
+	            that.calls.push(evt.call);
+	        }
+
+	        evt.call.listen('hangup', function () {
+	            removeCall({call: evt.call});
+	        });
+	    }
+
+	    /**
+	     * Remove the call or direct connection from internal record-keeping.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.removeCall
+	     * @param {object} evt
+	     * @param {respoke.Call} evt.target
+	     * @private
+	     */
+	    function removeCall(evt) {
+	        var match = 0;
+	        if (!evt.call) {
+	            throw new Error("Can't remove call without a call parameter.");
+	        }
+
+	        // Loop backward since we're modifying the array in place.
+	        for (var i = that.calls.length - 1; i >= 0; i -= 1) {
+	            if (that.calls[i].id === evt.call.id) {
+	                that.calls.splice(i, 1);
+	                match += 1;
+	            }
+	        }
+
+	        if (match !== 1) {
+	            log.warn("Something went wrong.", match, "calls were removed!");
+	        }
+	    }
+
+	    /**
+	     * Convenience method for setting presence to `"available"`.
+	     *
+	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.setOnline
+	     * @param {object} params
+	     * @param {string|number|object|Array} [params.presence=available] - The presence to set.
+	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of
+	     * this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @returns {Promise|undefined}
+	     */
+	    that.setOnline = function (params) {
+	        var promise;
+
+	        params = params || {};
+	        params.presence = params.presence || 'available';
+
+	        try {
+	            that.verifyConnected();
+	        } catch (e) {
+	            promise = Q.reject(e);
+	            return respoke.handlePromise(promise, params.onSuccess, params.onError);
+	        }
+
+	        return that.setPresence(params);
+	    };
+
+	    /**
+	     * Convenience method for setting presence to `"unavailable"`.
+	     *
+	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.setOffline
+	     * @param {object} params
+	     * @param {string|number|object|Array} [params.presence=unavailable] - The presence to set.
+	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of
+	     * this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @returns {Promise|undefined}
+	     */
+	    that.setOffline = function (params) {
+	        var promise;
+
+	        params = params || {};
+	        params.presence = params.presence || 'unavailable';
+
+	        try {
+	            that.verifyConnected();
+	        } catch (e) {
+	            promise = Q.reject(e);
+	            return respoke.handlePromise(promise, params.onSuccess, params.onError);
+	        }
+
+	        return that.setPresence(params);
+	    };
+
+	    /**
+	     * Send a message to an endpoint.
+	     *
+	     *     client.sendMessage({
+	     *         endpointId: 'dan',
+	     *         message: "Jolly good."
+	     *     });
+	     *
+	     *
+	     * **Using callbacks** by passing `params.onSuccess` or `params.onError` will disable promises.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.sendMessage
+	     * @param {object} params
+	     * @param {string} params.endpointId - The endpoint id of the recipient.
+	     * @param {string} [params.connectionId] - The optional connection id of the receipient. If not set, message will be
+	     * broadcast to all connections for this endpoint.
+	     * @param {string} params.message - a string message.
+	     * @param {sendHandler} [params.onSuccess] - Success handler for this invocation of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @returns {Promise|undefined}
+	     */
+	    that.sendMessage = function (params) {
+	        var promise;
+	        var retVal;
+	        var endpoint;
+	        try {
+	            that.verifyConnected();
+	        } catch (e) {
+	            promise = Q.reject(e);
+	            retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
+	            return retVal;
+	        }
+	        endpoint = that.getEndpoint({
+	            skipPresence: true,
+	            id: params.endpointId
+	        });
+	        delete params.endpointId;
+	        return endpoint.sendMessage(params);
+	    };
+
+	    /**
+	     * Experimental. Create a new conference call with the specified id.
+	     *
+	     *     client.joinConference({
+	     *         id: "javascript-meetup",
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.joinConference
+	     * @private
+	     * @param {object} params
+	     * @param {string} params.id - The id that should be used to create the conference call or the ID
+	     * of the call to join.
+	     * @param {string|boolean} params.audio - Whether participant should send and receive audio. Boolean `true`
+	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
+	     * indicate send only and receive only respectively.
+	     * @param {string|boolean} params.video - Whether participant should send and receive audio. Boolean `true`
+	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
+	     * indicate send only and receive only respectively.
+	     * @param {boolean} params.mixAudio - Whether Respoke should mix all the audio streams together to save bandwidth
+	     * for this one participant.
+	     * @param {Array<RTCConstraints>} [params.constraints]
+	     * @arg {respoke.Conference.onJoin} [params.onJoin] - Callback for when a participant joins the conference.
+	     * @arg {respoke.Conference.onLeave} [params.onLeave] - Callback for when a participant leaves the conference.
+	     * @arg {respoke.Conference.onMessage} [params.onMessage] - Callback for when a message is sent to the conference.
+	     * @param {respoke.Conference.onMute} [params.onMute] - Callback for when local or remote media is muted or unmuted.
+	     * @arg {respoke.Conference.onTopic} [params.onTopic] - Callback for the conference topic changes.
+	     * @arg {respoke.Conference.onPresenter} [params.onPresenter] - Callback for when the presenter changes.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
+	     * and the remote party has received the video.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @returns {respoke.Conference}
+	     */
+	    that.joinConference = function (params) {
+	        var conference = null;
+	        var recipient;
+
+	        params = params || {};
+	        params.open = !!params.open;
+
+	        that.verifyConnected();
+
+	        if (!params.id) {
+	            params.id = respoke.makeGUID();
+	        }
+
+	        recipient = {id: params.id};
+
+	        if (params.open) {
+	            params.key = undefined;
+	        } else if (!params.key) {
+	            params.key = respoke.makeGUID();
+	        }
+
+	        params.instanceId = instanceId;
+	        params.target = "conference";
+	        params.constraints = respoke.convertConstraints(params.constraints, [{
+	            video: false,
+	            audio: true,
+	            mandatory: {},
+	            optional: []
+	        }]);
+
+	        params.signalOffer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'offer';
+	            signalParams.target = params.target;
+	            signalParams.id = params.id;
+	            signalParams.key = params.key;
+	            signalParams.open = params.open;
+	            signalParams.recipient = recipient;
+	            signalParams.toType = "conference";
+
+	            that.signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
+	        };
+	        params.signalAnswer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'answer';
+	            signalParams.target = params.target;
+	            signalParams.recipient = recipient;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalParams.toType = "conference";
+	            that.signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
+	                signalParams.call.hangup({signal: false});
+	            });
+	        };
+	        params.signalConnected = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.connectionId = signalParams.call.connectionId;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalParams.recipient = recipient;
+	            signalParams.toType = "conference";
+	            that.signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
+	                signalParams.call.hangup();
+	            });
+	        };
+	        params.signalModify = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.recipient = recipient;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalParams.toType = "conference";
+	            that.signalingChannel.sendModify(signalParams).done();
+	        };
+	        params.signalCandidate = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.recipient = recipient;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalParams.toType = "conference";
+	            return that.signalingChannel.sendCandidate(signalParams);
+	        };
+	        params.signalHangup = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.recipient = recipient;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalParams.toType = "conference";
+	            that.signalingChannel.sendHangup(signalParams).done();
+	        };
+	        params.signalReport = function (signalParams) {
+	            log.debug("Sending debug report", signalParams.report);
+	            that.signalingChannel.sendReport(signalParams).done();
+	        };
+
+	        params.signalingChannel = that.signalingChannel;
+	        conference = respoke.Conference(params);
+	        addCall({call: conference.call});
+	        return conference;
+	    };
+
+	    /**
+	     * Create a new screen sharing call. Screenshares are inherently unidirectional video only. This may change
+	     * in the future when Chrome adds the ability to obtain screen video and microphone audio at the same time. For
+	     * now, if you also need audio, place a second audio only call.
+	     *
+	     * The endpoint who calls `client.startScreenShare` will be the one whose screen is shared. If you'd like to
+	     * implement this as a screenshare request in which the endpoint who starts the call is the watcher and
+	     * not the sharer, it is recommened that you use `endpoint.sendMessage` to send a control message to the user
+	     * whose screenshare is being requested so that user's app can call `client.startScreenShare`.
+	     *
+	     * NOTE: At this time, screen sharing only works with Chrome, and Chrome requires a Chrome extension to
+	     * access screen sharing features. Please see instructions at https://github.com/respoke/respoke-chrome-extension.
+	     * Support for additional browsers will be added in the future.
+	     *
+	     *     client.startScreenShare({
+	     *         endpointId: 'tian',
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.startScreenShare
+	     * @param {object} params
+	     * @param {string} params.endpointId - The id of the endpoint that should be called.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
+	     * and the remote party has received the video.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @param {string} [params.source] - Pass in what type of mediaSource you want. If omitted, you'll have access
+	     * to both the screen and windows. In firefox, you'll have access to the screen only.
+	     * @returns {respoke.Call}
+	     */
+	    that.startScreenShare = function (params) {
+	        that.verifyConnected();
+	        var endpoint = that.getEndpoint({
+	            skipPresence: true,
+	            id: params.endpointId
+	        });
+	        delete params.endpointId;
+	        return endpoint.startScreenShare(params);
+	    };
+
+	    /**
+	     * Place an audio and/or video call to an endpoint.
+	     *
+	     *     // defaults to video when no constraints are supplied
+	     *     client.startCall({
+	     *         endpointId: 'erin',
+	     *         onConnect: function (evt) { },
+	     *         onLocalMedia: function (evt) { }
+	     *     });
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.startCall
+	     * @param {object} params
+	     * @param {string} params.endpointId - The id of the endpoint that should be called.
+	     * @param {Array<RTCConstraints>} [params.constraints]
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
+	     * with the local audio and/or video attached.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
+	     * with the remote audio and/or video attached.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
+	     * up.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have
+	     * local video attached to it.
+	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have
+	     * remote video attached to it.
+	     * @return {respoke.Call}
+	     */
+	    that.startCall = function (params) {
+	        that.verifyConnected();
+	        var endpoint = that.getEndpoint({
+	            skipPresence: true,
+	            id: params.endpointId
+	        });
+	        delete params.endpointId;
+	        return endpoint.startCall(params);
+	    };
+
+	    /**
+	     * Place an audio only call to an endpoint.
+	     *
+	     *     client.startAudioCall({
+	     *         endpointId: 'erin',
+	     *         onConnect: function (evt) { },
+	     *         onLocalMedia: function (evt) { }
+	     *     });
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.startAudioCall
+	     * @param {object} params
+	     * @param {string} params.endpointId - The id of the endpoint that should be called.
+	     * @param {string} [params.connectionId]
+	     * @param {Array<RTCConstraints>} [params.constraints]
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 element
+	     * with the local audio and/or video attached.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 element
+	     * with the remote audio and/or video attached.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
+	     * up.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
+	     * video attached to it.
+	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
+	     * video attached to it.
+	     * @return {respoke.Call}
+	     */
+	    that.startAudioCall = function (params) {
+	        that.verifyConnected();
+	        var endpoint = that.getEndpoint({
+	            skipPresence: true,
+	            id: params.endpointId
+	        });
+	        delete params.endpointId;
+	        return endpoint.startAudioCall(params);
+	    };
+
+	    /**
+	     * Place a video call to an endpoint.
+	     *
+	     *     client.startVideoCall({
+	     *         endpointId: 'erin',
+	     *         onConnect: function (evt) { },
+	     *         onLocalMedia: function (evt) { }
+	     *     });
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.startVideoCall
+	     * @param {object} params
+	     * @param {string} params.endpointId - The id of the endpoint that should be called.
+	     * @param {Array<RTCConstraints>} [params.constraints]
+	     * @param {string} [params.connectionId]
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
+	     * with the local audio and/or video attached.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
+	     * with the remote audio and/or video attached.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
+	     * up.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
+	     * video attached to it.
+	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
+	     * video attached to it.
+	     * @return {respoke.Call}
+	     */
+	    that.startVideoCall = function (params) {
+	        that.verifyConnected();
+	        var endpoint = that.getEndpoint({
+	            skipPresence: true,
+	            id: params.endpointId
+	        });
+	        delete params.endpointId;
+	        return endpoint.startVideoCall(params);
+	    };
+
+	    /**
+	     * Place an audio call with a phone number.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.startPhoneCall
+	     * @param {object} params
+	     * @param {string} params.number - The phone number that should be called.
+	     * @param {string} params.callerId - The phone number to use as the caller ID for this phone call. This must
+	     * be a phone number listed in your Respoke account, associated with your app, and allowed by the role
+	     * that this client is authenticated with. If the role contains a list of numbers and the token does not contain
+	     * callerId, this field must be used to set caller ID selected from the list of numbers or no caller ID will be set.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
+	     * with the local audio and/or video attached.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
+	     * with the remote audio and/or video attached.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
+	     * up.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @return {respoke.Call}
+	     */
+	    that.startPhoneCall = function (params) {
+	        var promise;
+	        var call = null;
+	        var recipient = {};
+	        params = params || {};
+	        params.constraints = [{
+	            video: false,
+	            audio: true,
+	            mandatory: {},
+	            optional: []
+	        }];
+
+	        that.verifyConnected();
+
+	        if (!params.number) {
+	            throw new Error("Can't start a phone call without a number.");
+	        }
+
+	        if (typeof params.caller !== 'boolean') {
+	            params.caller = true;
+	        }
+
+	        recipient.id = params.number;
+
+	        params.instanceId = instanceId;
+	        params.remoteEndpoint = recipient;
+
+	        params.toType = params.toType || 'did';
+	        params.fromType = params.fromType || 'web';
+
+	        params.signalOffer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'offer';
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+
+	            // using hasOwnProperty here because callerId could be explicitly set to null or empty string
+	            if (params.hasOwnProperty('callerId')) {
+	                signalParams.callerId = {number: params.callerId};
+	            }
+	            that.signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
+	        };
+	        params.signalAnswer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'answer';
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
+	                log.error("Couldn't answer the call.", err.message, err.stack);
+	                signalParams.call.hangup({signal: false});
+	            });
+	        };
+	        params.signalConnected = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.connectionId = signalParams.connectionId;
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
+	                log.error("Couldn't send connected.", err.message, err.stack);
+	                signalParams.call.hangup();
+	            });
+	        };
+	        params.signalModify = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendModify(signalParams).done(null, function errorHandler(err) {
+	                log.error("Couldn't send modify.", err.message, err.stack);
+	            });
+	        };
+	        params.signalCandidate = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            return that.signalingChannel.sendCandidate(signalParams);
+	        };
+	        params.signalHangup = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendHangup(signalParams).done(null, function errorHandler(err) {
+	                log.error("Couldn't send hangup.", err.message, err.stack);
+	            });
+	        };
+	        params.signalReport = function (signalParams) {
+	            log.debug("Sending debug report", signalParams.report);
+	            that.signalingChannel.sendReport(signalParams);
+	        };
+
+	        params.signalingChannel = that.signalingChannel;
+	        call = respoke.Call(params);
+	        addCall({call: call});
+	        return call;
+	    };
+
+	    /**
+	     * Place an audio call to a SIP URI.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.startSIPCall
+	     * @param {object} params
+	     * @param {string} [params.uri] - The fully qualified SIP URI to call.
+	     * @param {string} [params.trunk] - The SIP trunk to call. This is not necessary if `uri` is set. If `uri` is not
+	     * set, both `trunk` and `user` are required, and `trunk` must be the ID of a Respoke SIP trunk. `user` is a
+	     * SIP username or extension.
+	     * @param {string} [params.user] - The SIP user to call. This is not necessary if `uri` is set. If `uri` is not
+	     * set, both `trunk` and `user` are required, and `trunk` must be the ID of a Respoke SIP trunk. `user` is a
+	     * SIP username or extension.
+	     * @param {object} [params.callerId] - Caller ID information for this call.
+	     * @param {string} [params.callerId.name] - Caller ID name.
+	     * @param {string} [params.callerId.number] - Caller ID number, extension, or SIP username.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video element
+	     * with the local audio and/or video attached.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video element
+	     * with the remote audio and/or video attached.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been hung
+	     * up.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @return {respoke.Call}
+	     */
+	    that.startSIPCall = function (params) {
+	        var promise;
+	        var call = null;
+	        var recipient = {};
+	        params = params || {};
+	        params.constraints = [{
+	            video: false,
+	            audio: true,
+	            mandatory: {},
+	            optional: []
+	        }];
+
+	        that.verifyConnected();
+
+	        if (!params.uri && !(params.trunk && params.user)) {
+	            throw new Error("Can't start a phone call without a SIP URI or a SIP trunk and user.");
+	        }
+
+	        if (typeof params.caller !== 'boolean') {
+	            params.caller = true;
+	        }
+
+	        params.uri = params.uri || (params.trunk + "/" + params.user);
+	        recipient.id = params.uri;
+
+	        params.instanceId = instanceId;
+	        params.remoteEndpoint = recipient;
+
+	        params.toType = params.toType || 'sip';
+	        params.fromType = params.fromType || 'web';
+
+	        params.signalOffer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'offer';
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+
+	            // using hasOwnProperty here because callerId could be explicitly set to null or empty string
+	            if (params.hasOwnProperty('callerId')) {
+	                signalParams.callerId = params.callerId;
+	            }
+	            that.signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
+	        };
+	        params.signalAnswer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'answer';
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
+	                log.error("Couldn't answer the call.", err.message, err.stack);
+	                signalParams.call.hangup({signal: false});
+	            });
+	        };
+	        params.signalConnected = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.connectionId = signalParams.connectionId;
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
+	                log.error("Couldn't send connected.", err.message, err.stack);
+	                signalParams.call.hangup();
+	            });
+	        };
+	        params.signalModify = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendModify(signalParams).done(null, function errorHandler(err) {
+	                log.error("Couldn't send modify.", err.message, err.stack);
+	            });
+	        };
+	        params.signalCandidate = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            return that.signalingChannel.sendCandidate(signalParams);
+	        };
+	        params.signalHangup = function (signalParams) {
+	            signalParams.target = 'call';
+	            signalParams.recipient = recipient;
+	            signalParams.toType = params.toType;
+	            signalParams.fromType = params.fromType;
+	            that.signalingChannel.sendHangup(signalParams).done(null, function errorHandler(err) {
+	                log.error("Couldn't send hangup.", err.message, err.stack);
+	            });
+	        };
+	        params.signalReport = function (signalParams) {
+	            log.debug("Sending debug report", signalParams.report);
+	            that.signalingChannel.sendReport(signalParams);
+	        };
+
+	        params.signalingChannel = that.signalingChannel;
+	        call = respoke.Call(params);
+	        addCall({call: call});
+	        return call;
+	    };
+
+	    /**
+	     * Assert that we are connected to the backend infrastructure.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.verifyConnected
+	     * @throws {Error}
+	     * @private
+	     */
+	    that.verifyConnected = function () {
+	        if (!that.signalingChannel.isConnected()) {
+	            throw new Error("Can't complete request when not connected. Please reconnect!");
+	        }
+	    };
+
+	    /**
+	     * Check whether this client is connected to the Respoke API.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.isConnected
+	     * @returns boolean
+	     */
+	    that.isConnected = function () {
+	        return that.signalingChannel.isConnected();
+	    };
+
+	    /**
+	     * Join a group and begin keeping track of it. If this method is called multiple times synchronously, it will
+	     * batch requests and only make one API call to Respoke.
+	     *
+	     * You can leave the group by calling `group.leave()`;
+	     *
+	     * ##### Joining and leaving a group
+	     *
+	     *      var group;
+	     *
+	     *      client.join({
+	     *          id: "book-club",
+	     *          onSuccess: function (evt) {
+	     *              console.log('I joined', evt.group.id);
+	     *              // "I joined book-club"
+	     *              group = evt.group;
+	     *              group.sendMessage({
+	     *                  message: 'sup'
+	     *              });
+	     *          }
+	     *      });
+	     *
+	     *      // . . .
+	     *      // Some time later, leave the group.
+	     *      // . . .
+	     *      group.leave({
+	     *          onSuccess: function (evt) {
+	     *              console.log('I left', evt.group.id);
+	     *              // "I left book-club"
+	     *          }
+	     *      });
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.join
+	     * @param {object} params
+	     * @param {string} params.id - The name of the group.
+	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of
+	     * this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @param {respoke.Group.onMessage} [params.onMessage] - Message handler for messages from this group only.
+	     * @param {respoke.Group.onJoin} [params.onJoin] - Join event listener for endpoints who join this group only.
+	     * @param {respoke.Group.onLeave} [params.onLeave] - Leave event listener for endpoints who leave
+	     * this group only.
+	     * @returns {Promise<respoke.Group>|undefined} The instance of the respoke.Group which the client joined.
+	     * @fires respoke.Client#join
+	     */
+	    that.join = function (params) {
+	        var deferred = Q.defer();
+	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
+	        try {
+	            that.verifyConnected();
+	        } catch (e) {
+	            deferred.reject(e);
+	            return retVal;
+	        }
+
+	        if (!params.id) {
+	            deferred.reject(new Error("Can't join a group with no group id."));
+	            return retVal;
+	        }
+
+	        log.trace('requested to join group', params.id);
+
+	        that.signalingChannel.joinGroup({
+	            groupList: [params.id]
+	        }).done(function successHandler() {
+	            var group;
+	            params.signalingChannel = that.signalingChannel;
+	            params.instanceId = instanceId;
+
+	            group = that.getGroup({id: params.id});
+
+	            if (!group) {
+	                group = respoke.Group(params);
+	                that.addGroup(group);
+	            }
+
+	            group.listen('join', params.onJoin);
+	            group.listen('leave', params.onLeave);
+	            group.listen('message', params.onMessage);
+
+	            group.addMember({
+	                connection: that.getConnection({
+	                    endpointId: that.endpointId,
+	                    connectionId: that.connectionId
+	                })
+	            });
+
+	            /**
+	             * This event is fired every time the client joins a group. If the client leaves
+	             * a group, this event will be fired again on the next time the client joins the group.
+	             * @event respoke.Client#join
+	             * @type {respoke.Event}
+	             * @property {respoke.Group} group
+	             * @property {string} name - the event name.
+	             */
+	            that.fire('join', {
+	                group: group
+	            });
+	            deferred.resolve(group);
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+	        return retVal;
+	    };
+
+	    /**
+	     * Add a Group. This is called when we join a group and need to begin keeping track of it.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.addGroup
+	     * @param {respoke.Group}
+	     * @private
+	     */
+	    that.addGroup = function (newGroup) {
+	        if (!newGroup || newGroup.className !== 'respoke.Group') {
+	            throw new Error("Can't add group to internal tracking without a group.");
+	        }
+
+	        newGroup.listen('leave', function leaveHandler(evt) {
+	            var endpointThatLeft = evt.connection.getEndpoint();
+
+	            if (!endpointThatLeft.hasListeners('presence') && endpointThatLeft.groupConnectionCount === 0) {
+	                // No one is listening, and it's not in any more groups.
+	                endpoints.every(function eachEndpoint(ept, index) {
+	                    if (ept.id === endpointThatLeft.id) {
+	                        endpoints.splice(index, 1);
+	                        return false;
+	                    }
+	                    return true;
+	                });
+	            }
+	        }, true);
+
+	        groups.push(newGroup);
+	    };
+
+	    /**
+	     * Get a list of all the groups the client is currently a member of.
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.getGroups
+	     * @returns {Array<respoke.Group>} All of the groups the library is aware of.
+	     */
+	    that.getGroups = function () {
+	        return groups;
+	    };
+
+	    /**
+	     * Find a group by id and return it.
+	     *
+	     *     var group = client.getGroup({
+	     *         id: "resistance"
+	     *     });
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.getGroup
+	     * @param {object} params
+	     * @param {string} params.id
+	     * @param {respoke.Group.onJoin} [params.onJoin] - Receive notification that an endpoint has joined this group.
+	     * @param {respoke.Group.onLeave} [params.onLeave] - Receive notification that an endpoint has left this group.
+	     * @param {respoke.Group.onMessage} [params.onMessage] - Receive notification that a message has been
+	     * received to a group.
+	     * @returns {respoke.Group|undefined} The group whose ID was specified.
+	     */
+	    that.getGroup = function (params) {
+	        var group;
+	        if (!params || !params.id) {
+	            throw new Error("Can't get a group without group id.");
+	        }
+
+	        groups.every(function eachGroup(grp) {
+	            if (grp.id === params.id) {
+	                group = grp;
+	                return false;
+	            }
+	            return true;
+	        });
+
+	        if (group) {
+	            group.listen('join', params.onJoin);
+	            group.listen('leave', params.onLeave);
+	            group.listen('message', params.onMessage);
+	        }
+
+	        return group;
+	    };
+
+	    /**
+	     * Find an endpoint by id and return the `respoke.Endpoint` object.
+	     *
+	     * If it is not already cached locally, will be added to the local cache of tracked endpoints,
+	     * its presence will be determined, and will be available in `client.getEndpoints()`.
+	     *
+	     *     var endpoint = client.getEndpoint({
+	     *         id: "dlee"
+	     *     });
+	     *
+	     * @ignore If the endpoint is not found in the local cache of endpoint objects (see `client.getEndpoints()`),
+	     * it will be created. This is useful, for example, in the case of dynamic endpoints where groups are
+	     * not in use. Override dynamic endpoint creation by setting `params.skipCreate = true`.
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.getEndpoint
+	     * @param {object} params
+	     * @param {string} params.id
+	     * @param {respoke.Endpoint.onMessage} [params.onMessage] - Handle messages sent to the logged-in user
+	     * from this one Endpoint.
+	     * @param {respoke.Endpoint.onPresence} [params.onPresence] - Handle presence notifications from this one
+	     * Endpoint.
+	     * @arg {boolean} [params.skipCreate] - Skip the creation step and return undefined if we don't yet
+	     * @arg {boolean} [params.skipPresence] - Skip registering for this endpoint's presence.
+	     * @returns {respoke.Endpoint} The endpoint whose ID was specified.
+	     */
+	    that.getEndpoint = function (params) {
+	        var endpoint;
+	        if (!params || !params.id) {
+	            throw new Error("Can't get an endpoint without endpoint id.");
+	        }
+
+	        endpoints.every(function eachEndpoint(ept) {
+	            if (ept.id === params.id) {
+	                endpoint = ept;
+	                return false;
+	            }
+	            return true;
+	        });
+
+	        if (!endpoint && params && !params.skipCreate) {
+	            params.instanceId = instanceId;
+	            params.signalingChannel = that.signalingChannel;
+	            params.resolveEndpointPresence = clientSettings.resolveEndpointPresence;
+	            params.addCall = addCall;
+
+	            endpoint = respoke.Endpoint(params);
+	            endpoints.push(endpoint);
+	        }
+
+	        if (!endpoint) {
+	            return;
+	        }
+
+	        if (params.skipPresence !== true) {
+	            that.signalingChannel.registerPresence({
+	                endpointList: [endpoint.id]
+	            }).done(null, function (err) {
+	                log.error("Couldn't register for presence on", endpoint.id, err.message);
+	            });
+	        }
+	        endpoint.listen('presence', params.onPresence);
+	        endpoint.listen('message', params.onMessage);
+
+	        return endpoint;
+	    };
+
+	    /**
+	     * Find a Connection by id and return it.
+	     *
+	     *     var connection = client.getConnection({
+	     *         id: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX"
+	     *     });
+	     *
+	     * @ignore In most cases, if we don't find it we will create it. This is useful
+	     * in the case of dynamic endpoints where groups are not in use. Set skipCreate=true
+	     * to return undefined if the Connection is not already known.
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.getConnection
+	     * @param {object} params
+	     * @param {string} params.connectionId
+	     * @param {string} [params.endpointId] - An endpointId to use in the creation of this connection.
+	     * @param {respoke.Endpoint.onMessage} [params.onMessage] - Handle messages sent to the logged-in user
+	     * from this one Connection.
+	     * @param {respoke.Endpoint.onPresence} [params.onPresence] - Handle presence notifications from this one
+	     * Connection.
+	     * @returns {respoke.Connection} The connection whose ID was specified.
+	     */
+	    that.getConnection = function (params) {
+	        var connection;
+	        var endpoint;
+	        var endpointsToSearch = endpoints;
+
+	        params = params || {};
+	        if (!params.connectionId) {
+	            throw new Error("Can't get a connection without connection id.");
+	        }
+	        if (!params.endpointId && !params.skipCreate) {
+	            throw new Error("Can't create a connection without endpoint id.");
+	        }
+
+	        if (params.endpointId) {
+	            endpoint = that.getEndpoint({
+	                id: params.endpointId,
+	                skipPresence: true,
+	                skipCreate: params.skipCreate
+	            });
+
+	            endpointsToSearch = [];
+	            if (endpoint) {
+	                endpointsToSearch = [endpoint];
+	            }
+	        }
+
+	        endpointsToSearch.every(function eachEndpoint(ept) {
+	            connection = ept.getConnection(params);
+	            return !connection;
+	        });
+
+	        if (!connection && !params.skipCreate) {
+	            params.instanceId = instanceId;
+	            connection = respoke.Connection(params);
+	            endpoint.connections.push(connection);
+	        }
+
+	        return connection;
+	    };
+
+	    /**
+	     * Get the list of **all endpoints** that the library has knowledge of.
+	     * These are `respoke.Endpoint` objects, not just the endpointIds.
+	     *
+	     * The library gains knowledge of an endpoint in two ways:
+	     * 1. when an endpoint joins a group that the user (currently logged-in endpoint) is a member of (if group presence is enabled)
+	     * 2. when an endpoint that the user (currently logged-in endpoint) is watching*
+	     *
+	     * *If an endpoint that the library does not know about sends a message to the client, you
+	     * can immediately call the `client.getEndpoint()` method on the sender of the message to enable
+	     * watching of the sender's endpoint.
+	     *
+	     *      client.on('message', function (data) {
+	     *          if (data.endpoint) {
+	     *              // start tracking this endpoint.
+	     *              client.getEndpoint({ id: data.endpoint.id });
+	     *          }
+	     *      });
+	     *
+	     *
+	     * @memberof! respoke.Client
+	     * @method respoke.Client.getEndpoints
+	     * @returns {Array<respoke.Endpoint>}
+	     */
+	    that.getEndpoints = function () {
+	        return endpoints;
+	    };
+
+	    /**
+	     * Get conference participants by conference id.
+	     *
+	     * ```
+	     * client.getConferenceParticipants({ id: 'mygroup' }).done(function (participants) {
+	     *     var ids = participants.map(function (p) { return p.endpointId; });
+	     *     console.log(ids); // ['person1', 'person2']
+	     * });
+	     * ```
+	     * @memberof respoke.Client
+	     * @method respoke.Client.getConferenceParticipants
+	     * @param object {params}
+	     * @param string {params.id}
+	     * @returns {Promise}
+	     */
+	    that.getConferenceParticipants = that.signalingChannel.getConferenceParticipants;
+
+	    return that;
+	}; // End respoke.Client
+
+	/**
+	 * Handle sending successfully.
+	 * @callback respoke.Client.successHandler
+	 */
+	/**
+	 * Handle joining a group successfully. This callback is called only once when Client.join() is called.
+	 * @callback respoke.Client.joinHandler
+	 * @param {respoke.Group} group
+	 */
+	/**
+	 * Receive notification that the client has joined a group. This callback is called everytime
+	 * respoke.Client#join is fired.
+	 * @callback respoke.Client.onJoin
+	 * @param {respoke.Event} evt
+	 * @param {respoke.Group} evt.group
+	 * @param {string} evt.name - the event name.
+	 */
+	/**
+	 * Receive notification that the client has left a group. This callback is called everytime
+	 * respoke.Client#leave is fired.
+	 * @callback respoke.Client.onLeave
+	 * @param {respoke.Event} evt
+	 * @param {respoke.Group} evt.group
+	 * @param {string} evt.name - the event name.
+	 */
+	/**
+	 * Receive notification that a message has been received. This callback is called every time
+	 * respoke.Client#message is fired.
+	 * @callback respoke.Client.onClientMessage
+	 * @param {respoke.Event} evt
+	 * @param {respoke.TextMessage} evt.message
+	 * @param {respoke.Group} [evt.group] - If the message is to a group we already know about,
+	 * this will be set. If null, the developer can use client.join({id: evt.message.header.channel}) to join
+	 * the group. From that point forward, Group#message will fire when a message is received as well. If
+	 * group is undefined instead of null, the message is not a group message at all.
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Client} evt.target
+	 */
+	/**
+	 * Receive notification that the client is receiving a call from a remote party. This callback is called every
+	 * time respoke.Client#call is fired.
+	 * @callback respoke.Client.onCall
+	 * @param {respoke.Event} evt
+	 * @param {respoke.Call} evt.call
+	 * @param {respoke.Endpoint} evt.endpoint
+	 * @param {string} evt.name - the event name.
+	 */
+	/**
+	 * Receive notification that the client is receiving a request for a direct connection from a remote party.
+	 * This callback is called every time respoke.Client#direct-connection is fired.
+	 * @callback respoke.Client.onDirectConnection
+	 * @param {respoke.Event} evt
+	 * @param {respoke.DirectConnection} evt.directConnection
+	 * @param {respoke.Endpoint} evt.endpoint
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Call} evt.target
+	 */
+	/**
+	 * Receive notification Respoke has successfully connected to the cloud. This callback is called every time
+	 * respoke.Client#connect is fired.
+	 * @callback respoke.Client.onConnect
+	 * @param {respoke.Event} evt
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Client} evt.target
+	 */
+	/**
+	 * Receive notification Respoke has successfully disconnected from the cloud. This callback is called every time
+	 * respoke.Client#disconnect is fired.
+	 * @callback respoke.Client.onDisconnect
+	 * @param {respoke.Event} evt
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Client} evt.target
+	 */
+	/**
+	 * Receive notification Respoke has successfully reconnected to the cloud. This callback is called every time
+	 * respoke.Client#reconnect is fired.
+	 * @callback respoke.Client.onReconnect
+	 * @param {respoke.Event} evt
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Client} evt.target
+	 */
+	/**
+	 * Handle disconnection to the cloud successfully.
+	 * @callback respoke.Client.disconnectSuccessHandler
+	 */
+	/**
+	 * Handle an error that resulted from a method call.
+	 * @callback respoke.Client.errorHandler
+	 * @params {Error} err
+	 */
+	/**
+	 * Handle connection to the cloud successfully.
+	 * @callback respoke.Client.connectSuccessHandler
+	 */
+
+
+/***/ },
+/* 10 */
+/***/ function(module, exports, __webpack_require__) {
+
+	/*
+	 * Copyright 2015, Digium, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under The MIT License found in the
+	 * LICENSE file in the root directory of this source tree.
+	 *
+	 * For all details and documentation:  https://www.respoke.io
+	 */
+
+	var respoke = __webpack_require__(1);
+
+	/**
+	 * A `respoke.Connection` always belongs to an Endpoint.
+	 *
+	 * There is a distinction between Endpoint and Connection because an Endpoint can be authenticated
+	 * from multiple devices, browsers, or browser tabs. Each of these separate authentications is a Connection.
+	 * A Client can choose to interact with connections of the same endpoint in different ways.
+	 *
+	 * @constructor
+	 * @class respoke.Connection
+	 * @augments respoke.EventEmitter
+	 * @param {object} params
+	 * @param {string} params.id
+	 * @returns {respoke.Connection}
+	 */
+	module.exports = function (params) {
+	    "use strict";
+	    params = params || {};
+	    /**
+	     * @memberof! respoke.Connection
+	     * @name instanceId
+	     * @private
+	     * @type {string}
+	     */
+	    var instanceId = params.instanceId;
+	    var that = respoke.EventEmitter(params);
+	    /**
+	     * @memberof! respoke.DirectConnection
+	     * @name client
+	     * @type {respoke.Client}
+	     * @private
+	     */
+	    var client = respoke.getClient(instanceId);
+
+	    /**
+	     * The connection id.
+	     * @memberof! respoke.Connection
+	     * @name id
+	     * @type {string}
+	     */
+	    that.id = that.id || that.connectionId;
+	    if (!that.id) {
+	        throw new Error("Can't make a connection without an id.");
+	    }
+	    delete that.instanceId;
+	    delete that.connectionId;
+
+	    /**
+	     * A name to identify the type of this object.
+	     * @memberof! respoke.Connection
+	     * @name className
+	     * @type {string}
+	     */
+	    that.className = 'respoke.Connection';
+
+	    /**
+	     * Represents the presence status. Typically a string, but other types are supported.
+	     * Defaults to `'unavailable'`.
+	     *
+	     * **Do not modify this directly** - it won't update presence with Respoke. Presence must be updated
+	     * by the remote endpoint.
+	     *
+	     * @memberof! respoke.Connection
+	     * @name presence
+	     * @type {string|number|object|Array}
+	     */
+	    that.presence = 'unavailable';
+
+	    /**
+	     * Deprecated: use endpoint.presence instead.
+	     *
+	     * Return the presence.
+	     * @memberof! respoke.Connection
+	     * @deprecated
+	     * @name presence
+	     * @type {string|number|object|Array}
+	     */
+	    that.getPresence = function () {
+	        return that.presence;
+	    };
+
+	    /**
+	     * Send a message to this connection of an endpoint. If the endpoint has multiple connections,
+	     * it will only receive the message at this connection.
+	     *
+	     *     connection.sendMessage({
+	     *         message: "PJ, put that PBR down!"
+	     *     });
+	     *
+	     * **Using callbacks** will disable promises.
+	     * @memberof! respoke.Connection
+	     * @method respoke.Connection.sendMessage
+	     * @param {object} params
+	     * @param {string} params.message
+	     * @param {boolean} [params.ccSelf=false] Copy this client's own endpoint on this message so that they arrive
+	     * at other devices it might be logged into elsewhere.
+	     * @param {boolean} [params.push=false] Whether or not the message should be considered for push notifications to
+	     * mobile devices.
+	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation
+	     * of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @returns {Promise|undefined}
+	     */
+	    that.sendMessage = function (params) {
+	        params = params || {};
+	        params.connectionId = that.id;
+	        params.ccSelf = (typeof params.ccSelf === "boolean" ? params.ccSelf : false);
+	        return that.getEndpoint().sendMessage(params);
+	    };
+
+	    /**
+	     * Create a new screen sharing call. Screenshares are inherently unidirectional video only. This may change
+	     * in the future when Chrome adds the ability to obtain screen video and microphone audio at the same time. For
+	     * now, if you also need audio, place a second audio only call.
+	     *
+	     * The endpoint who calls `connection.startScreenShare` will be the one whose screen is shared. If you'd like to
+	     * implement this as a screenshare request in which the endpoint who starts the call is the watcher and
+	     * not the sharer, it is recommened that you use `endpoint.sendMessage` to send a control message to the user
+	     * whose screenshare is being requested so that user's app can call `connection.startScreenShare`.
+	     *
+	     * NOTE: At this time, screen sharing only works with Chrome, and Chrome requires a Chrome extension to
+	     * access screen sharing features. Please see instructions at https://github.com/respoke/respoke-chrome-extension.
+	     * Support for additional browsers will be added in the future.
+	     *
+	     *     connection.startScreenShare({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Connection
+	     * @method respoke.Connection.startScreenShare
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
+	     * and the remote party has received the video.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @returns {respoke.Call}
+	     */
+	    that.startScreenShare = function (params) {
+	        client.verifyConnected();
+	        params.connectionId = that.id;
+	        return that.getEndpoint().startScreenShare(params);
+	    };
+
+	    /**
+	     * Create a new Call for a voice and/or video call this particular connection, only. The Call cannot be answered
+	     * by another connection of this Endpoint.
+	     *
+	     *     connection.startCall({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Connection
+	     * @method respoke.Connection.startCall
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
+	     * element with the remote
+	     * audio and/or video attached.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {RTCConstraints} [params.constraints]
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
+	     * video attached to it.
+	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
+	     * video attached to it.
+	     * @returns {respoke.Call}
+	     */
+	    that.startCall = function (params) {
+	        params = params || {};
+	        params.connectionId = that.id;
+	        return that.getEndpoint().startCall(params);
+	    };
+
+	    /**
+	     * Create a new audio-only call.
+	     *
+	     *     connection.startAudioCall({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Connection
+	     * @method respoke.Connection.startAudioCall
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
+	     * element with the remote
+	     * audio and/or video attached.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @returns {respoke.Call}
+	     */
+	    that.startAudioCall = function (params) {
+	        client.verifyConnected();
+	        params.connectionId = that.id;
+	        return that.getEndpoint().startAudioCall(params);
+	    };
+
+	    /**
+	     * Create a new call with audio and video.
+	     *
+	     *     connection.startVideoCall({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Connection
+	     * @method respoke.Connection.startVideoCall
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
+	     * element with the remote
+	     * audio and/or video attached.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has
+	     * been hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @returns {respoke.Call}
+	     */
+	    that.startVideoCall = function (params) {
+	        client.verifyConnected();
+	        params.connectionId = that.id;
+	        return that.getEndpoint().startVideoCall(params);
+	    };
+
+	    /**
+	     * Create a new DirectConnection with this particular connection, only. The DirectConnection cannot be answered
+	     * by another connection of this Endpoint.  This method creates a new Call as well, attaching this
+	     * DirectConnection to it for the purposes of creating a peer-to-peer link for sending data such as messages to
+	     * the other endpoint. Information sent through a DirectConnection is not handled by the cloud infrastructure.
+	     *
+	     *     connection.startDirectConnection({
+	     *         onOpen: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Connection
+	     * @method respoke.Connection.startDirectConnection
+	     * @param {object} params
+	     * @param {respoke.Call.directConnectionSuccessHandler} [params.onSuccess] - Success handler for this
+	     * invocation of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @param {respoke.DirectConnection.onStart} [params.onStart] - A callback for when setup of the direct
+	     * connection begins. The direct connection will not be open yet.
+	     * @param {respoke.DirectConnection.onOpen} [params.onOpen] - A callback for receiving notification of when
+	     * the DirectConnection is open and ready to be used.
+	     * @param {respoke.DirectConnection.onError} [params.onError] - Callback for errors setting up the direct
+	     * connection.
+	     * @param {respoke.DirectConnection.onClose} [params.onClose] - A callback for receiving notification of
+	     * when the DirectConnection is closed and the two Endpoints are disconnected.
+	     * @param {respoke.DirectConnection.onMessage} [params.onMessage] - A callback for receiving messages sent
+	     * through the DirectConnection.
+	     * @param {respoke.DirectConnection.onAccept} [params.onAccept] - Callback for when the user accepts the
+	     * request for a direct connection and setup begins.
+	     * @returns {respoke.DirectConnection} The DirectConnection which can be used to send data and messages
+	     * directly to the other endpoint.
+	     */
+	    that.startDirectConnection = function (params) {
+	        var retVal;
+	        var deferred;
+	        params = params || {};
+
+	        try {
+	            client.verifyConnected();
+	        } catch (err) {
+	            deferred = respoke.Q.defer();
+	            retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
+	            deferred.reject(err);
+	            return retVal;
+	        }
+
+	        params.connectionId = that.id;
+	        return that.getEndpoint().startDirectConnection(params);
+	    };
+
+	    /**
+	     * Get the Endpoint that this Connection belongs to.
+	     * @memberof! respoke.Connection
+	     * @method respoke.Connection.getEndpoint
+	     * @returns {respoke.Endpoint}
+	     */
+	    that.getEndpoint = function () {
+	        return client.getEndpoint({
+	            id: that.endpointId,
+	            skipPresence: true
+	        });
+	    };
+
+	    return that;
+	}; // End respoke.Connection
+
+
+/***/ },
+/* 11 */
+/***/ function(module, exports, __webpack_require__) {
+
+	/*
+	 * Copyright 2015, Digium, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under The MIT License found in the
+	 * LICENSE file in the root directory of this source tree.
+	 *
+	 * For all details and documentation:  https://www.respoke.io
+	 */
+
+	var Q = __webpack_require__(8);
+	var respoke = __webpack_require__(1);
+	var log = respoke.log;
+
+	/**
+	 * `respoke.Endpoint`s are users of a Respoke app.
+	 * An Endpoint can be a person in a browser or device, or an app using Respoke APIs from a server.
+	 * A Client can interact with endpoints through messages, audio or video calls, or direct connections.
+	 * An Endpoint may be authenticated from multiple devices to the same app (each of which is
+	 * represented by a Connection).
+	 *
+	 * ```
+	 * var jim = client.getEndpoint({ id: 'jim' });
+	 * ```
+	 *
+	 * @constructor
+	 * @class respoke.Endpoint
+	 * @augments respoke.EventEmitter
+	 * @param {object} params
+	 * @param {string} params.id
+	 * @param {string} params.instanceId
+	 * @param {respoke.client.resolvePresence} [params.resolvePresence] An optional function for resolving presence
+	 * for an endpoint.
+	 * @returns {respoke.Endpoint}
+	 */
+	module.exports = function (params) {
+	    "use strict";
+	    params = params || {};
+	    /**
+	     * @memberof! respoke.Endpoint
+	     * @name instanceId
+	     * @private
+	     * @type {string}
+	     */
+	    var instanceId = params.instanceId;
+	    var that = respoke.EventEmitter(params);
+	    /**
+	     * @memberof! respoke.DirectConnection
+	     * @name client
+	     * @type {respoke.Client}
+	     * @private
+	     */
+	    var client = respoke.getClient(instanceId);
+	    /**
+	     * @memberof! respoke.DirectConnection
+	     * @name signalingChannel
+	     * @type {respoke.SignalingChannel}
+	     * @private
+	     */
+	    var signalingChannel = params.signalingChannel;
+	    /**
+	     * The number this endpoint's connections that are joined to groups. So if
+	     * an endpoint has 3 connections in the same group, the
+	     * `groupConnectionCount` for that endpoint would be 3.
+	     *
+	     * @memberof! respoke.DirectConnection
+	     * @name groupConnectionCount
+	     * @type {number}
+	     */
+	    that.groupConnectionCount = 0;
+
+	    var addCall = params.addCall;
+
+	    delete that.signalingChannel;
+	    delete that.instanceId;
+	    delete that.connectionId;
+	    delete that.addCall;
+	    /**
+	     * A name to identify the type of this object.
+	     * @memberof! respoke.Endpoint
+	     * @name className
+	     * @type {string}
+	     */
+	    that.className = 'respoke.Endpoint';
+	    /**
+	     * A direct connection to this endpoint. This can be used to send direct messages.
+	     * @memberof! respoke.Endpoint
+	     * @name directConnection
+	     * @type {respoke.DirectConnection}
+	     */
+	    that.directConnection = null;
+
+	    /**
+	     * Array of connections for this endpoint.
+	     * @memberof! respoke.Endpoint
+	     * @name connections
+	     * @type {Array<respoke.Connection>}
+	     */
+	    that.connections = [];
+	    client.listen('disconnect', function disconnectHandler() {
+	        that.connections = [];
+	    });
+
+	    var resolveEndpointPresence = params.resolveEndpointPresence;
+	    delete that.resolveEndpointPresence;
+
+	    /**
+	     * Represents the presence status. Typically a string, but other types are supported.
+	     * Defaults to `'unavailable'`.
+	     *
+	     * **Do not modify this directly** - it won't update presence with Respoke. Presence must be updated
+	     * by the remote endpoint.
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @name presence
+	     * @type {string|number|object|Array}
+	     */
+	    that.presence = 'unavailable';
+
+	    /**
+	     * Deprecated: use endpoint.presence instead.
+	     *
+	     * Return the presence.
+	     * @memberof! respoke.Endpoint
+	     * @deprecated
+	     * @name presence
+	     * @type {string|number|object|Array}
+	     */
+	    that.getPresence = function () {
+	        return that.presence;
+	    };
+
+	    /**
+	     * Internally set the presence on the object for this session upon receipt of a presence notification from
+	     * the backend. Respoke developers shouldn't use this.
+	     *
+	     * While technically available on an Endpoint or Connection, this will not trigger
+	     * any API changes. The changes will only be reflected locally.
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.setPresence
+	     * @param {object} params
+	     * @param {string|number|object|Array} [params.presence=available]
+	     * @param {string} params.connectionId
+	     * @fires respoke.Endpoint#presence
+	     * @private
+	     */
+	    that.setPresence = function (params) {
+	        var connection;
+	        params = params || {};
+	        params.presence = params.presence || 'available';
+	        params.connectionId = params.connectionId || that.connectionId;
+
+	        if (!params.connectionId) {
+	            throw new Error("Can't set Endpoint presence without a connectionId.");
+	        }
+
+	        connection = that.getConnection({connectionId: params.connectionId}) || client.getConnection({
+	            connectionId: params.connectionId,
+	            skipCreate: false,
+	            endpointId: that.id
+	        });
+
+	        connection.presence = params.presence;
+	        that.resolvePresence();
+
+	        /**
+	         * This event indicates that the presence for this endpoint has been updated.
+	         * @event respoke.Endpoint#presence
+	         * @type {respoke.Event}
+	         * @property {string|number|object|Array} presence
+	         * @property {string} name - the event name.
+	         * @property {respoke.Endpoint} target
+	         */
+	        that.fire('presence', {
+	            presence: that.presence
+	        });
+	    };
+
+	    /**
+	     * Send a message to the endpoint through the infrastructure.
+	     *
+	     * ```
+	     * endpoint.sendMessage({
+	     *     message: "wassuuuuup"
+	     * });
+	     * ```
+	     *
+	     * **Using callbacks** will disable promises.
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.sendMessage
+	     * @param {object} params
+	     * @param {string} params.message
+	     * @param {string} [params.connectionId]
+	     * @param {boolean} [params.ccSelf=true] Copy this client's own endpoint on this message so that they arrive
+	     * at other devices it might be logged into elsewhere.
+	     * @param {boolean} [params.push=false] Whether or not to consider the message for push notifications to mobile
+	     * devices.
+	     * @param {respoke.Client.successHandler} [params.onSuccess] - Success handler for this invocation of this
+	     * method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this method
+	     * only.
+	     * @returns {Promise|undefined}
+	     */
+	    that.sendMessage = function (params) {
+	        var promise;
+	        var retVal;
+	        params = params || {};
+	        params.ccSelf = (typeof params.ccSelf === "boolean" ? params.ccSelf : true);
+
+	        promise = signalingChannel.sendMessage({
+	            ccSelf: params.ccSelf,
+	            connectionId: params.connectionId,
+	            message: params.message,
+	            push: !!params.push,
+	            recipient: that
+	        });
+
+	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
+	        return retVal;
+	    };
+
+	    /**
+	     * Create a new audio-only call.
+	     *
+	     *     endpoint.startAudioCall({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.startAudioCall
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
+	     * element with the remote
+	     * audio and/or video attached.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @returns {respoke.Call}
+	     */
+	    that.startAudioCall = function (params) {
+	        params = params || {};
+
+	        params.constraints = respoke.convertConstraints(params.constraints, [{
+	            video: false,
+	            audio: true,
+	            optional: [],
+	            mandatory: {}
+	        }]);
+
+	        return that.startCall(params);
+	    };
+
+	    /**
+	     * Create a new call with audio and video.
+	     *
+	     *     endpoint.startVideoCall({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.startVideoCall
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
+	     * element with the remote
+	     * audio and/or video attached.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @returns {respoke.Call}
+	     */
+	    that.startVideoCall = function (params) {
+	        params = params || {};
+
+	        params.constraints = respoke.convertConstraints(params.constraints, [{
+	            video: true,
+	            audio: true,
+	            optional: [],
+	            mandatory: {}
+	        }]);
+
+	        return that.startCall(params);
+	    };
+
+	    /**
+	     * The endpoint who calls `endpoint.startScreenShare` will be the one whose screen is shared. If you'd like to
+	     * implement this as a screenshare request in which the endpoint who starts the call is the watcher and
+	     * not the sharer, it is recommended that you use `endpoint.sendMessage` to send a control message to the user
+	     * whose screenshare is being requested so that user's app can call `endpoint.startScreenShare`.
+	     *
+	     * By default, the call will be one-way screen share only, with the recipient sending nothing. To turn it into
+	     * a bidirectional call with the recipient sending video and both parties sending audio, set `params.sendOnly`
+	     * to false.
+	     *
+	     * NOTE: At this time, screen sharing only works with Chrome and Firefox, and both require browser extensions to
+	     * access screen sharing features. Please see instructions at https://github.com/respoke/respoke-chrome-extension
+	     * and https://github.com/respoke/respoke-firefox-screen-sharing-extension.
+	     *
+	     *     endpoint.startScreenShare({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.startScreenShare
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
+	     * and the remote party has received the video.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {Array<RTCConstraints>} [params.constraints] - Additional media to add to the call.
+	     * @param {RTCConstraints} [params.screenConstraints] - Overrides for the screen media.
+	     * @param {boolean} [params.sendOnly=true] - Whether the call should be unidirectional.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @param {string} [params.source] - Pass in what type of mediaSource you want. If omitted, you'll have access
+	     * to both the screen and windows. In firefox, you'll have access to the screen only.
+	     * @returns {respoke.Call}
+	     */
+	    that.startScreenShare = function (params) {
+	        params = params || {};
+	        var hasAudio;
+	        var addAudio;
+	        params.target = 'screenshare';
+
+	        if (typeof params.caller !== 'boolean') {
+	            params.caller = true;
+	        }
+
+	        // true and undefined -> true
+	        // receiveOnly will be set in call.js by respoke.sdpHasSendOnly
+	        params.sendOnly = (params.caller && (params.sendOnly || (params.sendOnly === undefined)));
+	        addAudio = (!params.sendOnly && (!params.screenConstraints ||
+	            (params.screenConstraints && params.screenConstraints.audio)));
+
+	        if (params.caller) {
+	            params.constraints = respoke.convertConstraints(params.constraints);
+	            params.constraints.push(respoke.getScreenShareConstraints({
+	                constraints: params.screenConstraints
+	            }));
+	            delete params.screenConstraints;
+
+	            params.constraints.forEach(function (con) {
+	                if (con.audio) {
+	                    hasAudio = true;
+	                }
+	            });
+
+	            /* If they didn't override screensharing constraints and no constraints so far have included audio,
+	             * add audio to the call. If they overrode the default screensharing constraints, we'll assume they
+	             * know what they are doing and didn't want audio.
+	             */
+	            if (addAudio && !hasAudio) {
+	                params.constraints.push({
+	                    audio: true,
+	                    video: false
+	                });
+	            }
+	        }
+
+	        return that.startCall(params);
+	    };
+
+	    /**
+	     * Create a new call.
+	     *
+	     *     endpoint.startCall({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.startCall
+	     * @param {object} params
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for receiving an HTML5 Video
+	     * element with the remote
+	     * audio and/or video attached.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onMute} [params.onMute] - Callback for changing the mute state on any type of media.
+	     * This callback will be called when media is muted or unmuted.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {respoke.Call.previewLocalMedia} [params.previewLocalMedia] - A function to call if the developer
+	     * wants to perform an action between local media becoming available and calling approve().
+	     * @param {Array<RTCConstraints>} [params.constraints]
+	     * @param {boolean} [params.receiveOnly] - whether or not we accept media
+	     * @param {boolean} [params.sendOnly] - whether or not we send media
+	     * @param {boolean} [params.needDirectConnection] - flag to enable skipping media & opening direct connection.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
+	     * all connections belonging to this endpoint.
+	     * @param {HTMLVideoElement} [params.videoLocalElement] - Pass in an optional html video element to have local
+	     * video attached to it.
+	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
+	     * video attached to it.
+	     * @returns {respoke.Call}
+	     */
+	    that.startCall = function (params) {
+	        var call = null;
+	        params = params || {};
+
+	        params.constraints = respoke.convertConstraints(params.constraints, [{
+	            video: true,
+	            audio: true,
+	            mandatory: {},
+	            optional: []
+	        }]);
+
+	        // If they are requesting a screen share by constraints without having called startScreenShare
+	        if (params.target !== 'screenshare' && params.constraints[0] &&
+	                respoke.constraintsHasScreenShare(params.constraints[0])) {
+	            return that.startScreenShare(params);
+	        }
+
+	        params.target = params.target || "call";
+
+	        log.debug('Endpoint.call', params);
+	        client.verifyConnected();
+	        if (typeof params.caller !== 'boolean') {
+	            params.caller = true;
+	        }
+
+	        if (!that.id) {
+	            log.error("Can't start a call without endpoint ID!");
+	            return;
+	        }
+
+	        params.instanceId = instanceId;
+	        params.remoteEndpoint = that;
+
+	        params.signalOffer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'offer';
+	            signalParams.target = params.target;
+	            signalParams.recipient = that;
+
+	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
+	        };
+	        params.signalAnswer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'answer';
+	            signalParams.target = params.target;
+	            signalParams.recipient = that;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
+	                signalParams.call.hangup({signal: false});
+	            });
+	        };
+	        params.signalConnected = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.connectionId = signalParams.call.connectionId;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalParams.recipient = that;
+	            signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
+	                signalParams.call.hangup();
+	            });
+	        };
+	        params.signalModify = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.recipient = that;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalingChannel.sendModify(signalParams).done();
+	        };
+	        params.signalCandidate = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.recipient = that;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            return signalingChannel.sendCandidate(signalParams);
+	        };
+	        params.signalHangup = function (signalParams) {
+	            signalParams.target = params.target;
+	            signalParams.recipient = that;
+	            signalParams.sessionId = signalParams.call.sessionId;
+	            signalingChannel.sendHangup(signalParams).done();
+	        };
+	        params.signalReport = function (signalParams) {
+	            log.debug("Sending debug report", signalParams.report);
+	            signalingChannel.sendReport(signalParams).done();
+	        };
+
+	        params.signalingChannel = signalingChannel;
+	        call = respoke.Call(params);
+	        addCall({call: call});
+	        return call;
+	    };
+
+	    /**
+	     * Create a new DirectConnection.  This method creates a new Call as well, attaching this DirectConnection to
+	     * it for the purposes of creating a peer-to-peer link for sending data such as messages to the other endpoint.
+	     * Information sent through a DirectConnection is not handled by the cloud infrastructure.  If there is already
+	     * a direct connection open, this method will resolve the promise with that direct connection instead of
+	     * attempting to create a new one.
+	     *
+	     *     endpoint.startDirectConnection({
+	     *         onOpen: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.startDirectConnection
+	     * @param {object} params
+	     * @param {respoke.Call.directConnectionSuccessHandler} [params.onSuccess] - Success handler for this
+	     * invocation of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @param {respoke.DirectConnection.onStart} [params.onStart] - A callback for when setup of the direct
+	     * connection begins. The direct connection will not be open yet.
+	     * @param {respoke.DirectConnection.onOpen} [params.onOpen] - A callback for receiving notification of when
+	     * the DirectConnection is open and ready to be used.
+	     * @param {respoke.DirectConnection.onError} [params.onError] - Callback for errors setting up the direct
+	     * connection.
+	     * @param {respoke.DirectConnection.onClose} [params.onClose] - A callback for receiving notification of
+	     * when the DirectConnection is closed and the two Endpoints are disconnected.
+	     * @param {respoke.DirectConnection.onAccept} [params.onAccept] - Callback for when the user accepts the
+	     * request for a direct connection and setup begins.
+	     * @param {respoke.DirectConnection.onMessage} [params.onMessage] - A callback for receiving messages sent
+	     * through the DirectConnection.
+	     * @param {string} [params.connectionId] - An optional connection ID to use for this connection. This allows
+	     * the connection to be made to a specific instance of an endpoint in the case that the same endpoint is logged
+	     * in from multiple locations.
+	     * @returns {Promise<respoke.DirectConnection>} The DirectConnection which can be used to send data and messages
+	     * directly to the other endpoint.
+	     */
+	    that.startDirectConnection = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
+	        var call;
+
+	        try {
+	            client.verifyConnected();
+	        } catch (err) {
+	            deferred.reject(err);
+	            return retVal;
+	        }
+
+	        if (that.directConnection || params.create === false) {
+	            deferred.resolve(that.directConnection);
+	            return retVal;
+	        }
+
+	        if (typeof params.caller !== 'boolean') {
+	            params.caller = true;
+	        }
+
+	        if (!that.id) {
+	            deferred.reject(new Error("Can't start a direct connection without endpoint ID!"));
+	            return retVal;
+	        }
+
+	        params.instanceId = instanceId;
+	        params.remoteEndpoint = that;
+
+	        params.signalOffer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.signalType = 'offer';
+	            signalParams.target = 'directConnection';
+	            signalParams.recipient = that;
+
+	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
+	        };
+	        params.signalConnected = function (signalParams) {
+	            signalParams.target = 'directConnection';
+	            signalParams.recipient = that;
+	            signalingChannel.sendConnected(signalParams).done(null, function errorHandler(err) {
+	                signalParams.call.hangup();
+	            });
+	        };
+	        params.signalAnswer = function (signalParams) {
+	            var onSuccess = signalParams.onSuccess;
+	            var onError = signalParams.onError;
+	            delete signalParams.onSuccess;
+	            delete signalParams.onError;
+
+	            signalParams.target = 'directConnection';
+	            signalParams.recipient = that;
+	            signalParams.signalType = 'answer';
+	            signalingChannel.sendSDP(signalParams).then(onSuccess, onError).done(null, function errorHandler(err) {
+	                signalParams.call.hangup({signal: false});
+	            });
+	        };
+	        params.signalCandidate = function (signalParams) {
+	            signalParams.target = 'directConnection';
+	            signalParams.recipient = that;
+	            return signalingChannel.sendCandidate(signalParams);
+	        };
+	        params.signalHangup = function (signalParams) {
+	            signalParams.target = 'directConnection';
+	            signalParams.recipient = that;
+	            signalingChannel.sendHangup(signalParams).done();
+	        };
+	        params.signalReport = function (signalParams) {
+	            signalParams.report.target = 'directConnection';
+	            log.debug("Not sending report");
+	            log.debug(signalParams.report);
+	        };
+	        params.needDirectConnection = true;
+	        // Don't include audio in the offer SDP
+	        params.offerOptions = {
+	            mandatory: {
+	                OfferToReceiveAudio: false
+	            }
+	        };
+
+	        params.signalingChannel = signalingChannel;
+	        call = respoke.Call(params);
+	        addCall({call: call});
+	        call.listen('direct-connection', function directConnectionHandler(evt) {
+	            that.directConnection = evt.directConnection;
+	            if (params.caller !== true) {
+	                if (!client.hasListeners('direct-connection') &&
+	                        !client.hasListeners('direct-connection') &&
+	                        !call.hasListeners('direct-connection')) {
+	                    that.directConnection.reject();
+	                    deferred.reject(new Error("Got an incoming direct connection with no handlers to accept it!"));
+	                    return;
+	                }
+
+	                deferred.resolve(that.directConnection);
+	                that.directConnection.listen('close', function closeHandler(evt) {
+	                    that.directConnection = undefined;
+	                }, true);
+	            }
+	        }, true);
+
+	        return retVal;
+	    };
+
+	    /**
+	     * Default presence list.
+	     * @private
+	     */
+	    var PRESENCE_CONSTANTS = ['chat', 'available', 'away', 'dnd', 'xa', 'unavailable'];
+
+	    /**
+	     * Find the presence out of all known connections with the highest priority (most availability)
+	     * and set it as the endpoint's resolved presence.
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.resolvePresence
+	     * @private
+	     */
+	    that.resolvePresence = function () {
+
+	        var presenceList = that.connections.map(function (connection) {
+	            return connection.presence;
+	        });
+
+	        if (resolveEndpointPresence !== undefined) {
+	            that.presence = resolveEndpointPresence(presenceList);
+	        } else {
+	            var idList;
+
+	            /*
+	             * Sort the connections array by the priority of the value of the presence of that
+	             * connectionId. This will cause the first element in the list to be the id of the
+	             * session with the highest priority presence so we can access it by the 0 index.
+	             * TODO: If we don't really care about the sorting and only about the highest priority
+	             * we could use Array.prototype.every to improve this algorithm.
+	             */
+	            idList = that.connections.sort(function sorter(a, b) {
+	                var indexA = PRESENCE_CONSTANTS.indexOf(a.presence);
+	                var indexB = PRESENCE_CONSTANTS.indexOf(b.presence);
+	                // Move it to the end of the list if it isn't one of our accepted presence values
+	                indexA = indexA === -1 ? 1000 : indexA;
+	                indexB = indexB === -1 ? 1000 : indexB;
+	                return indexA < indexB ? -1 : (indexB < indexA ? 1 : 0);
+	            });
+
+	            if (idList[0]) {
+	                that.presence = idList[0].presence;
+	            } else {
+	                that.presence = 'unavailable';
+	            }
+	        }
+	    };
+
+	    /**
+	     * Get the Connection with the specified id. The connection ID is optional if only one connection exists.
+	     *
+	     *     var connection = endpoint.getConnection({
+	     *         connectionId: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX"
+	     *     });
+	     *
+	     * @memberof! respoke.Endpoint
+	     * @method respoke.Endpoint.getConnection
+	     * @private
+	     * @param {object} params
+	     * @param {string} [params.connectionId]
+	     * @return {respoke.Connection}
+	     */
+	    that.getConnection = function (params) {
+	        var connection = null;
+	        params = params || {};
+	        if (that.connections.length === 1 &&
+	                (!params.connectionId || that.connections[0] === params.connectionId)) {
+	            return that.connections[0];
+	        }
+
+	        if (!params || !params.connectionId) {
+	            throw new Error("Can't find a connection without the connectionId.");
+	        }
+
+	        that.connections.every(function eachConnection(conn) {
+	            if (conn.id === params.connectionId) {
+	                connection = conn;
+	                return false;
+	            }
+	            return true;
+	        });
+
+	        return connection;
+	    };
+
+	    /**
+	     * Called to indicate that a connection for this endpoint has joined a
+	     * group.
+	     *
+	     * @private
+	     * @returns {number} Number of groups this endpoint is a member of.
+	     */
+	    that.joinedGroup = function () {
+	        ++that.groupConnectionCount;
+	    };
+
+	    /**
+	     * Called to indicate that a connection for this endpoint has left a
+	     * group.
+	     *
+	     * @private
+	     * @returns {number} Number of groups this endpoint is a member of.
+	     */
+	    that.leftGroup = function () {
+	        --that.groupConnectionCount;
+	    };
+
+	    return that;
+	}; // End respoke.Endpoint
+	/**
+	 * Handle messages sent to the logged-in user from this one Endpoint.  This callback is called every time
+	 * respoke.Endpoint#message fires.
+	 * @callback respoke.Endpoint.onMessage
+	 * @param {respoke.Event} evt
+	 * @param {respoke.TextMessage} evt.message - the message
+	 * @param {respoke.Endpoint} evt.target
+	 * @param {string} evt.name - the event name
+	 */
+	/**
+	 * Handle presence notifications from this one Endpoint.  This callback is called every time
+	 * respoke.Endpoint#message fires.
+	 * @callback respoke.Endpoint.onPresence
+	 * @param {respoke.Event} evt
+	 * @param {string|number|object|Array} evt.presence - the Endpoint's presence
+	 * @param {respoke.Endpoint} evt.target
+	 * @param {string} evt.name - the event name
+	 */
+	 /**
+	 * Handle resolving presence for this endpoint
+	 * @callback respoke.Client.resolveEndpointPresence
+	 * @param {Array<object>} connectionPresence
+	 * @returns {object|string|number}
+	 */
+
+
+/***/ },
+/* 12 */
+/***/ function(module, exports) {
+
+	/*
+	 * Copyright 2015, Digium, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under The MIT License found in the
+	 * LICENSE file in the root directory of this source tree.
+	 *
+	 * For all details and documentation:  https://www.respoke.io
+	 */
+
+	/**
+	 * A text message and the information needed to route it.
+	 * @class respoke.TextMessage
+	 * @constructor
+	 * @param {object} params
+	 * @param {string} [params.endpointId] - If sending, endpoint ID of the thing we're sending a message to.
+	 * @param {string} [params.cSelf] - Copy this client's own endpoint on this message so that they arrive
+	 * at other devices it might be logged into elsewhere.
+	 * @param {string} [params.connectionId] - If sending, connection ID of the thing we're sending a message to.
+	 * @param {string} [params.message] - If sending, a message to send
+	 * @param {object} [params.rawMessage] - If receiving, the parsed JSON we got from the server
+	 * @private
+	 * @returns {respoke.TextMessage}
+	 */
+	module.exports = function (params) {
+	    "use strict";
+	    params = params || {};
+	    var that = {};
+
+	    /**
+	     * Parse rawMessage and set attributes required for message delivery.
+	     * @memberof! respoke.TextMessage
+	     * @method respoke.TextMessage.parse
+	     * @private
+	     */
+	    function parse() {
+	        if (params.rawMessage) {
+	            try {
+	                that.endpointId = params.rawMessage.header.from;
+	                that.originalRecipient = params.rawMessage.header.toOriginal;
+	                that.connectionId = params.rawMessage.header.fromConnection;
+	                that.timestamp = params.rawMessage.header.timestamp;
+	            } catch (e) {
+	                throw new Error(e);
+	            }
+	            that.message = params.rawMessage.message || params.rawMessage.body;
+	            if (params.rawMessage.header.channel) {
+	                that.recipient = params.rawMessage.header.channel;
+	            }
+	        } else {
+	            try {
+	                that.to = params.endpointId;
+	                that.ccSelf = params.ccSelf;
+	                that.toConnection = params.connectionId;
+	                that.requestConnectionReply = (params.requestConnectionReply === true);
+	                that.push = (params.push === true);
+	            } catch (e) {
+	                throw new Error(e);
+	            }
+	            that.message = params.message;
+	        }
+	    }
+
+	    parse();
+	    return that;
+	}; // End respoke.TextMessage
+
+
+/***/ },
+/* 13 */
+/***/ function(module, exports) {
+
+	/*
+	 * Copyright 2015, Digium, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under The MIT License found in the
+	 * LICENSE file in the root directory of this source tree.
+	 *
+	 * For all details and documentation:  https://www.respoke.io
+	 */
+
+	/**
+	 * A signaling message and the information needed to route it.
+	 * @class respoke.SignalingMessage
+	 * @constructor
+	 * @param {object} params
+	 * @param {string} [params.fromEndpoint] - If sending, the endpoint ID of the recipient
+	 * @param {string} [params.fromConnection] - If sending, the connection ID of the recipient
+	 * @param {string} [params.connectionId] - The connectionId of the endpoint whose answer signal has been accepted.
+	 * @param {string} [params.signal] - If sending, a message to send
+	 * @param {respoke.Endpoint} [params.recipient]
+	 * @param {string} [params.signalType]
+	 * @param {string} [params.sessionId] - A globally unique ID to identify this call.
+	 * @param {string} [params.target] - Either 'call' or 'directConnection', TODO remove the need for this.
+	 * @param {string} [params.callerId] - Human readable caller ID. Not implemented.
+	 * @param {RTCSessionDescription} [params.sdp]
+	 * @param {Array<RTCIceCandidate>} [params.iceCandidates]
+	 * @param {object} [params.offering] - Object describing the media we're offering to send the remote party in a more
+	 * usable way than SDP. Not implemented.
+	 * @param {object} [params.requesting] - Object describing the media we're requesting from the remote party in a more
+	 * usable way than SDP. Not implemented.
+	 * @param {string} [params.reason] - Human readable reason for hanging up.
+	 * @param {string} [params.error] - String indicating that a previous signal was malformed or received in the wrong
+	 * state. Not implemented.
+	 * @param {string} [params.status] - "Ringing". Not implemented.
+	 * @param {object} [params.rawMessage] - If receiving, the parsed JSON we got from the server
+	 * @private
+	 * @returns {respoke.SignalingMessage}
+	 */
+	module.exports = function (params) {
+	    "use strict";
+	    params = params || {};
+	    var that = {};
+	    /**
+	     * Attributes without which we cannot build a signaling message.
+	     * @memberof! respoke.SignalingMessage
+	     * @name required
+	     * @private
+	     * @type {string}
+	     */
+	    var required = ['recipient', 'signalType', 'sessionId', 'target', 'signalId'];
+	    /**
+	     * Attributes which we will copy onto the signal if defined.
+	     * @memberof! respoke.SignalingMessage
+	     * @name required
+	     * @private
+	     * @type {string}
+	     */
+	    var allowed = [
+	        'signalType', 'sessionId', 'sessionDescription', 'iceCandidates', 'offering', 'target', 'signalId', 'callerId',
+	        'requesting', 'reason', 'error', 'status', 'connectionId', 'version', 'finalCandidates'
+	    ];
+
+	    params.version = '1.0';
+
+	    /**
+	     * Parse rawMessage and set attributes required for message delivery.
+	     * @memberof! respoke.SignalingMessage
+	     * @method respoke.SignalingMessage.parse
+	     * @private
+	     */
+	    function parse() {
+	        if (params.rawMessage) {
+	            try {
+	                that = JSON.parse(params.rawMessage.body); // Incoming message
+	            } catch (e) {
+	                that = params.rawMessage.body;
+	            }
+	            that.fromType = params.rawMessage.header.fromType;
+	            that.fromEndpoint = params.rawMessage.header.from;
+	            that.fromConnection = params.rawMessage.header.fromConnection;
+	            that.timestamp = params.rawMessage.header.timestamp;
+
+	            if (!that.target) {
+	                that.target = 'call';
+	            }
+	        } else {
+	            required.forEach(function eachAttr(attr) {
+	                if (params[attr] === 0 || !params[attr]) {
+	                    throw new Error("Can't build a signaling without " + attr);
+	                }
+	            });
+
+	            allowed.forEach(function eachAttr(attr) {
+	                if (params[attr] === 0 || params[attr]) {
+	                    that[attr] = params[attr];
+	                }
+	            });
+	        }
+	    }
+
+	    parse();
+	    return that;
+	}; // End respoke.SignalingMessage
+
+
+/***/ },
+/* 14 */
+/***/ function(module, exports, __webpack_require__) {
+
+	/*
+	 * Copyright 2015, Digium, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under The MIT License found in the
+	 * LICENSE file in the root directory of this source tree.
+	 *
+	 * For all details and documentation:  https://www.respoke.io
+	 */
+
+	var Q = __webpack_require__(8);
+	var respoke = __webpack_require__(1);
+
+	/**
+	 * A `respoke.Group` represents a collection of endpoints.
+	 *
+	 * There are methods to communicate with the endpoints at the group level and track
+	 * their presence in the group.
+	 *
+	 * @class respoke.Group
+	 * @augments respoke.EventEmitter
+	 * @constructor
+	 * @param {object} params
+	 * @param {string} params.instanceId
+	 * @param {respoke.Group.onJoin} params.onJoin - A callback to receive notifications every time a new
+	 * endpoint has joined the group. This callback does not get called when the client joins the group.
+	 * @param {respoke.Group.onMessage} params.onMessage - A callback to receive messages sent to the group from
+	 * remote endpoints.
+	 * @param {respoke.Group.onLeave} params.onLeave - A callback to receive notifications every time a new
+	 * endpoint has left the group. This callback does not get called when the client leaves the group.
+	 * @returns {respoke.Group}
+	 */
+	module.exports = function (params) {
+	    "use strict";
+	    params = params || {};
+
+	    var that = respoke.EventEmitter(params);
+	    /**
+	     * @memberof! respoke.Group
+	     * @name instanceId
+	     * @private
+	     * @type {string}
+	     */
+	    var instanceId = params.instanceId;
+	    var client = respoke.getClient(instanceId);
+
+	    if (!that.id) {
+	        throw new Error("Can't create a group without an ID.");
+	    }
+
+	    /**
+	     * Indicates whether there have been group membership changes since the last time we performed
+	     * a network request to list group members.
+	     * @memberof! respoke.Group
+	     * @name cacheIsValid
+	     * @private
+	     * @type {boolean}
+	     */
+	    var cacheIsValid = false;
+
+	    /**
+	     * Internal reference to the api signaling channel.
+	     * @memberof! respoke.Group
+	     * @name signalingChannel
+	     * @type respoke.SignalingChannel
+	     * @private
+	     */
+	    var signalingChannel = params.signalingChannel;
+	    delete params.signalingChannel;
+
+	    /**
+	     * The connections to members of this group.
+	     * @memberof! respoke.Group
+	     * @name endpoints
+	     * @type {array<respoke.Connection>}
+	     */
+	    that.connections = [];
+	    /**
+	     * A name to identify the type of this object.
+	     * @memberof! respoke.Group
+	     * @name className
+	     * @type {string}
+	     */
+	    that.className = 'respoke.Group';
+	    that.listen('join', params.onJoin);
+	    /**
+	     * Indicates that a message has been sent to this group.
+	     * @event respoke.Group#message
+	     * @type {respoke.Event}
+	     * @property {respoke.TextMessage} message
+	     * @property {string} name - The event name.
+	     * @property {respoke.Group} target
+	     */
+	    that.listen('message', params.onMessage);
+	    that.listen('leave', params.onLeave);
+
+	    /**
+	     * Clear out the connections within this group. Called when we're no longer
+	     * connected to the group.
+	     * @private
+	     */
+	    function clearConnections() {
+	        that.connections.forEach(function (connection) {
+	            connection.getEndpoint().leftGroup();
+	        });
+	        that.connections = [];
+	    }
+
+	    client.listen('disconnect', function disconnectHandler() {
+	        cacheIsValid = false;
+	        clearConnections();
+	    }, true);
+
+	    delete that.instanceId;
+	    delete that.onMessage;
+	    delete that.onPresence;
+	    delete that.onJoin;
+	    delete that.onLeave;
+
+	    /**
+	     * Join this group.
+	     *
+	     *     group.join().done(function () {
+	     *         group.sendMessage({
+	     *             message: "Hey, ppl! I'm here!"
+	     *         });
+	     *     }, function (err) {
+	     *         // Couldn't join the group, possibly permissions error
+	     *     });
+	     *
+	     * **Using callbacks** will disable promises.
+	     *
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.join
+	     * @return {Promise|undefined}
+	     * @param {object} params
+	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of
+	     * this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @fires respoke.Client#join
+	     */
+	    that.join = function () {
+	        var params = {
+	            id: that.id
+	        };
+	        var promise;
+	        var deferred;
+	        var retVal;
+	        cacheIsValid = false;
+
+	        try {
+	            validateConnection();
+	        } catch (err) {
+	            deferred = Q.defer();
+	            retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
+	            deferred.reject(err);
+	            return retVal;
+	        }
+
+	        promise = client.join(params);
+	        retVal = respoke.handlePromise(promise, params.onSuccess, params.onError);
+	        return retVal;
+	    };
+
+	    /**
+	     * Leave this group. If this method is called multiple times synchronously, it will batch requests and
+	     * only make one API call to Respoke.
+	     *
+	     *     group.leave({
+	     *         onSuccess: function () {
+	     *             // good riddance
+	     *         },
+	     *         onError: function (err) {
+	     *             // Couldn't leave the group, possibly a permissions error
+	     *         }
+	     *     });
+	     *
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.leave
+	     * @param {object} params
+	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of
+	     * this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
+	     * method only.
+	     * @return {Promise|undefined}
+	     * @fires respoke.Client#leave
+	     */
+	    that.leave = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
+
+	        try {
+	            validateConnection();
+	            validateMembership();
+	        } catch (err) {
+	            deferred.reject(err);
+	            return retVal;
+	        }
+
+	        signalingChannel.leaveGroup({
+	            groupList: [that.id]
+	        }).done(function successHandler() {
+	            clearConnections();
+	            deferred.resolve();
+	            cacheIsValid = false;
+
+	            /**
+	             * This event is fired when the client leaves a group.
+	             * @event respoke.Client#leave
+	             * @type {respoke.Event}
+	             * @property {respoke.Group} group
+	             * @property {string} name - the event name.
+	             * @property {respoke.Client} target
+	             * @private
+	             */
+	            client.fire('leave', {
+	                group: that
+	            });
+	        }, function errorHandler(err) {
+	            deferred.reject();
+	        });
+	        return retVal;
+	    };
+
+	    /**
+	     * Remove a Connection from a Group. This does not change the status of the remote Endpoint, it only changes the
+	     * internal representation of the Group membership. This method should only be used internally.
+	     * @private
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.removeMember
+	     * @param {object} params
+	     * @param {string} [params.connectionId] - Endpoint's connection id
+	     * @fires respoke.Group#leave
+	     */
+	    that.removeMember = function (params) {
+	        params = params || {};
+
+	        try {
+	            validateConnection();
+	            validateMembership();
+	        } catch (err) {
+	            return;
+	        }
+
+	        if (!params.connectionId) {
+	            throw new Error("Can't remove a member to the group without it's Connection id.");
+	        }
+
+	        cacheIsValid = false;
+
+	        that.connections.every(function eachConnection(conn, index) {
+	            if (conn.id === params.connectionId) {
+	                that.connections.splice(index, 1);
+	                conn.getEndpoint().leftGroup();
+
+	                /**
+	                 * This event is fired when a member leaves a group the client is a member of.
+	                 * @event respoke.Group#leave
+	                 * @type {respoke.Event}
+	                 * @property {respoke.Connection} connection - The connection that left the group.
+	                 * @property {string} name - The event name.
+	                 * @property {respoke.Group} target
+	                 */
+	                that.fire('leave', {
+	                    connection: conn
+	                });
+	                return false;
+	            }
+	            return true;
+	        });
+	    };
+
+	    /**
+	     * Return true if the logged-in user is a member of this group and false if not.
+	     *
+	     *     if (group.isJoined()) {
+	     *         // I'm a member!
+	     *     } else {
+	     *         // Maybe join here
+	     *     }
+	     *
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.isJoined
+	     * @returns {boolean}
+	     */
+	    that.isJoined = function () {
+	        // connections array contains some connections and ours is among them.
+	        return (that.connections.length > 0 && !that.connections.every(function (conn) {
+	            return conn.id !== client.connectionId;
+	        }));
+	    };
+
+	    /**
+	     * Add a Connection to a group. This does not change the status of the remote Endpoint, it only changes the
+	     * internal representation of the Group membership. This method should only be used internally.
+	     * @memberof! respoke.Group
+	     * @private
+	     * @method respoke.Group.addMember
+	     * @param {object} params
+	     * @param {respoke.Connection} params.connection
+	     * @fires respoke.Group#join
+	     */
+	    that.addMember = function (params) {
+	        params = params || {};
+	        var absent;
+
+	        validateConnection();
+
+	        if (!params.connection) {
+	            throw new Error("Can't add a member to the group without it's Connection object.");
+	        }
+
+	        cacheIsValid = false;
+
+	        absent = that.connections.every(function eachConnection(conn) {
+	            return (conn.id !== params.connection.id);
+	        });
+
+	        if (absent) {
+	            that.connections.push(params.connection);
+	            params.connection.getEndpoint().joinedGroup();
+	            if (params.skipEvent) {
+	                return;
+	            }
+
+	            /**
+	             * This event is fired when a member joins a Group that the currently logged-in endpoint is a member
+	             * of.
+	             * @event respoke.Group#join
+	             * @type {respoke.Event}
+	             * @property {respoke.Connection} connection - The connection that joined the group.
+	             * @property {string} name - The event name.
+	             * @property {respoke.Group} target
+	             */
+	            that.fire('join', {
+	                connection: params.connection
+	            });
+	        }
+	    };
+
+	    /**
+	     * Validate that the client is connected to the Respoke infrastructure.
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.validateConnection
+	     * @private
+	     */
+	    function validateConnection() {
+	        if (!signalingChannel || !signalingChannel.isConnected()) {
+	            throw new Error("Can't complete request when not connected. Please reconnect!");
+	        }
+	    }
+
+	    /**
+	     * Validate that the client is a member of this group.
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.validateMembership
+	     * @private
+	     */
+	    function validateMembership() {
+	        if (!that.isJoined()) {
+	            throw new Error("Not a member of this group anymore.");
+	        }
+	    }
+
+	    /**
+	     *
+	     * Send a message to all of the endpoints in the group.
+	     *
+	     *      var group = client.getGroup({ id: 'js-enthusiasts'});
+	     *
+	     *      group.sendMessage({
+	     *          message: "Cat on keyboard",
+	     *          onSuccess: function (evt) {
+	     *              console.log('Message was sent');
+	     *          }
+	     *      });
+	     *
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.sendMessage
+	     * @param {object} params
+	     * @param {string} params.message - The message.
+	     * @param {boolean} [params.push=false] - Whether or not the message should be considered for push notifications to
+	     * mobile devices.
+	     * @param {function} params.onSuccess - Success handler indicating that the message was delivered.
+	     * @param {function} params.onError - Error handler indicating that the message was not delivered.
+	     * @returns {Promise|undefined}
+	     */
+	    that.sendMessage = function (params) {
+	        params = params || {};
+	        params.id = that.id;
+	        var promise;
+
+	        try {
+	            validateConnection();
+	            validateMembership();
+	        } catch (err) {
+	            promise = Q.reject(err);
+	        }
+
+	        return respoke.handlePromise(promise ? promise : signalingChannel.publish(params),
+	                params.onSuccess, params.onError);
+	    };
+
+	    /**
+	     * Get group members
+	     *
+	     * Get an array containing all connections subscribed to the group. Accepts onSuccess or onError parameters,
+	     * or it returns a promise that you can observe. An endpoint may have more than one connection subscribed to
+		 * a group, so if you're interested in unique endpoints, you may want to filter the connections by endpointId.
+	     *
+	     *     group.getMembers({
+	     *         onSuccess: function (connections) {
+	     *             connections.forEach(function (connection) {
+	     *                 console.log(connection.endpointId);
+	     *             });
+	     *         }
+	     *     });
+	     *
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.getMembers
+	     * @param {object} params
+	     * @param {respoke.Client.joinHandler} [params.onSuccess] - Success handler for this invocation of this method only.
+	     * @param {respoke.Client.errorHandler} [params.onError] - Success handler for this invocation of this method only.
+	     * @returns {Promise<Array>} A promise to an array of Connections.
+	     */
+	    that.getMembers = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
+
+	        try {
+	            validateConnection();
+	            validateMembership();
+	        } catch (err) {
+	            deferred.reject(err);
+	            return retVal;
+	        }
+
+	        if (that.connections.length > 0 && cacheIsValid) {
+	            deferred.resolve(that.connections);
+	            return retVal;
+	        }
+
+	        signalingChannel.getGroupMembers({
+	            id: that.id
+	        }).done(function successHandler(list) {
+	            var endpointList = [];
+	            list.forEach(function eachMember(params) {
+	                var connection = client.getConnection({
+	                    endpointId: params.endpointId,
+	                    connectionId: params.connectionId,
+	                    skipCreate: true
+	                });
+
+	                if (!connection) {
+	                    // Create the connection
+	                    connection = client.getConnection({
+	                        endpointId: params.endpointId,
+	                        connectionId: params.connectionId
+	                    });
+	                }
+
+	                if (endpointList.indexOf(params.endpointId) === -1) {
+	                    endpointList.push(params.endpointId);
+	                }
+	                that.addMember({
+	                    connection: connection,
+	                    skipEvent: true
+	                });
+	            });
+
+	            cacheIsValid = true;
+
+	            deferred.resolve(that.connections);
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+	        return retVal;
+	    };
+
+	    /**
+	     * Experimental. Create a new conference call. The ID will be the group name. Only members of this group will
+	     * be permitted to participate in the conference call.
+	     *
+	     *     group.joinConference({
+	     *         onConnect: function (evt) {}
+	     *     });
+	     *
+	     * @memberof! respoke.Group
+	     * @method respoke.Group.joinConference
+	     * @private
+	     * @param {object} params
+	     * @param {string|boolean} params.audio - Whether participant should send and receive audio. Boolean `true`
+	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
+	     * indicate send only and receive only respectively.
+	     * @param {string|boolean} params.video - Whether participant should send and receive audio. Boolean `true`
+	     * indicates send and receive. Boolean `false` indicates neither send nor receive. Strings `send` and `receive`
+	     * indicate send only and receive only respectively.
+	     * @param {boolean} params.mixAudio - Whether Respoke should mix all the audio streams together to save bandwidth
+	     * for this one participant.
+	     * @arg {respoke.Conference.onJoin} [params.onJoin] - Callback for when a participant joins the conference.
+	     * @arg {respoke.Conference.onLeave} [params.onLeave] - Callback for when a participant leaves the conference.
+	     * @arg {respoke.Conference.onMessage} [params.onMessage] - Callback for when a message is sent to the conference.
+	     * @param {respoke.Conference.onMute} [params.onMute] - Callback for when local or remote media is muted or unmuted.
+	     * @arg {respoke.Conference.onTopic} [params.onTopic] - Callback for the conference topic changes.
+	     * @arg {respoke.Conference.onPresenter} [params.onPresenter] - Callback for when the presenter changes.
+	     * @param {respoke.Call.onError} [params.onError] - Callback for errors that happen during call setup or
+	     * media renegotiation.
+	     * @param {respoke.Call.onLocalMedia} [params.onLocalMedia] - Callback for receiving an HTML5 Video
+	     * element with the local audio and/or video attached.
+	     * @param {respoke.Call.onConnect} [params.onConnect] - Callback for when the screenshare is connected
+	     * and the remote party has received the video.
+	     * @param {respoke.Call.onHangup} [params.onHangup] - Callback for being notified when the call has been
+	     * hung up.
+	     * @param {respoke.Call.onAllow} [params.onAllow] - When setting up a call, receive notification that the
+	     * browser has granted access to media.
+	     * @param {respoke.Call.onAnswer} [params.onAnswer] - Callback for when the callee answers the call.
+	     * @param {respoke.Call.onApprove} [params.onApprove] - Callback for when the user approves local media. This
+	     * callback will be called whether or not the approval was based on user feedback. I. e., it will be called even if
+	     * the approval was automatic.
+	     * @param {respoke.Call.onRequestingMedia} [params.onRequestingMedia] - Callback for when the app is waiting
+	     * for the user to give permission to start getting audio or video.
+	     * @param {respoke.MediaStatsParser.statsHandler} [params.onStats] - Callback for receiving statistical
+	     * information.
+	     * @param {boolean} [params.forceTurn] - If true, media is not allowed to flow peer-to-peer and must flow through
+	     * relay servers. If it cannot flow through relay servers, the call will fail.
+	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
+	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @returns {respoke.Conference}
+	     */
+	    that.joinConference = function (params) {
+	        var conference = null;
+	        params = params || {};
+	        params.id = that.id;
+
+	        conference = client.joinConference(params);
+	        return conference;
+	    };
+
+	    return that;
+	}; // End respoke.Group
+	/**
+	 * Receive notification that an endpoint has joined this group. This callback is called everytime
+	 * respoke.Group#join is fired.
+	 * @callback respoke.Group.onJoin
+	 * @param {respoke.Event} evt
+	 * @param {respoke.Connection} evt.connection
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Group} evt.target
+	 */
+	/**
+	 * Receive notification that an endpoint has left this group. This callback is called everytime
+	 * respoke.Group#leave is fired.
+	 * @callback respoke.Group.onLeave
+	 * @param {respoke.Event} evt
+	 * @param {respoke.Connection} evt.connection
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Group} evt.target
+	 */
+	/**
+	 * Receive notification that a message has been received to a group. This callback is called every time
+	 * respoke.Group#message is fired.
+	 * @callback respoke.Group.onMessage
+	 * @param {respoke.Event} evt
+	 * @param {respoke.TextMessage} evt.message
+	 * @param {string} evt.name - the event name.
+	 * @param {respoke.Group} evt.target
+	 */
+	/**
+	 * Get a list of the Connections which are members of this Group.
+	 * @callback respoke.Group.connectionsHandler
+	 * @param {Array<respoke.Connection>} connections
+	 */
+
+
+/***/ },
+/* 15 */
+/***/ function(module, exports, __webpack_require__) {
+
+	/*
+	 * Copyright 2015, Digium, Inc.
+	 * All rights reserved.
+	 *
+	 * This source code is licensed under The MIT License found in the
+	 * LICENSE file in the root directory of this source tree.
+	 *
+	 * For all details and documentation:  https://www.respoke.io
+	 */
+	'use strict';
+
+	var Q = __webpack_require__(8);
+	var respoke = __webpack_require__(1);
+	var template = __webpack_require__(16);
+	var log = respoke.log;
+
+	var sdkHeaderValue = 'Respoke.js/' + respoke.version;
+
+	var billingSuspensionErrorMessage = "Can't perform this action: Not Authorized. Your account is suspended due to a " +
+	    "billing issue. Please visit the Respoke Developer Portal (https://www.respoke.io) or contact customer support " +
+	    "(support@respoke.io) to address this issue.";
+
+	var suspensionErrorMessage = "Canot perform this action: Not Authorized. Your account is suspended. Please visit " +
+	    "the Respoke Developer Portal (https://www.respoke.io) or contact customer support (support@respoke.io) to " +
+	    "address this issue.";
+
+	/**
+	 * Returns a timestamp, measured in milliseconds.
+	 *
+	 * This method will use high resolution time, if available. Otherwise it falls back to just
+	 * using the wall clock.
+	 *
+	 * @return {number} Number of milliseconds that have passed since some point in the past.
+	 * @private
+	 */
+	var now;
+	if (window.performance && window.performance.now) {
+	    now = window.performance.now.bind(window.performance);
+	} else if (Date.now) {
+	    now = Date.now.bind(Date);
+	} else {
+	    now = function () {
+	        return new Date().getTime();
+	    };
+	}
+
+	/**
+	 * Container for holding requests that are currently waiting on responses.
+	 * @returns {PendingRequests}
+	 * @private
+	 * @constructor
+	 */
+	var PendingRequests = function () {
+	    /**
+	     * Pending requests.
+	     * @private
+	     * @type {Array}
+	     */
+	    var contents = [];
+	    /**
+	     * Counter to provide the next id.
+	     * @private
+	     * @type {number}
+	     */
+	    var counter = 0;
+	    var that = {};
+
+	    /**
+	     * Add a new pending request.
+	     *
+	     * @memberof PendingRequests
+	     * @param obj
+	     * @returns {*} The key to use for the `remove` method.
+	     */
+	    that.add = function (obj) {
+	        contents[counter] = obj;
+	        counter++;
+	        return counter;
+	    };
+
+	    /**
+	     * Remove a pending request.
+	     *
+	     * @param {*} key Key returned from `add` method.
+	     */
+	    that.remove = function (key) {
+	        delete contents[key];
+	    };
+
+	    /**
+	     * Disposes of any currently pending requests, synchronously invoking the provided function on
+	     * each.
+	     *
+	     * @param {function} [fn] Callback for pending requests.
+	     */
+	    that.reset = function (fn) {
+	        if (fn) {
+	            contents.forEach(fn);
+	        }
+	        contents = [];
+	    };
+
+	    return that;
+	};
+
+	/**
+	 * The purpose of this class is to make a method call for each API call
+	 * to the backend REST interface.  This class takes care of App authentication, websocket connection,
+	 * Endpoint authentication, and all App interactions thereafter.  Almost all methods return a Promise.
+	 * @class respoke.SignalingChannel
+	 * @constructor
+	 * @augments respoke.EventEmitter
+	 * @param {object} params
+	 * @param {string} params.instanceId - client id
+	 * @private
+	 * @returns {respoke.SignalingChannel}
+	 */
+	module.exports = function (params) {
+	    params = params || {};
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name instanceId
+	     * @private
+	     * @type {string}
+	     */
+	    var instanceId = params.instanceId;
+	    var that = respoke.EventEmitter(params);
+	    delete that.instanceId;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name className
+	     * @type {string}
+	     * @private
+	     */
+	    that.className = 'respoke.SignalingChannel';
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name client
+	     * @private
+	     * @type {respoke.Client}
+	     */
+	    var client = respoke.getClient(instanceId);
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name socket
+	     * @private
+	     * @type {Socket.io.Socket}
+	     */
+	    that.socket = null;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name clientSettings
+	     * @private
+	     * @type {object}
+	     */
+	    var clientSettings = params.clientSettings;
+	    delete that.clientSettings;
+	    clientSettings.baseURL = clientSettings.baseURL || 'https://api.respoke.io';
+	    /**
+	     * A map to avoid duplicate endpoint presence registrations.
+	     * @memberof! respoke.SignalingChannel
+	     * @name presenceRegistered
+	     * @private
+	     * @type {object}
+	     */
+	    var presenceRegistered = {};
+	    /**
+	     * A reference to the private function Client.actuallyConnect that gets set in SignalingChannel.open() so we
+	     * don't have to make it public.
+	     * @memberof! respoke.SignalingChannel
+	     * @name actuallyConnect
+	     * @private
+	     * @type {function}
+	     */
+	    var actuallyConnect = null;
+	    /**
+	     * Set of promises for any pending requests on the WebSocket.
+	     * @private
+	     * @type {PendingRequests}
+	     */
+	    var pendingRequests = PendingRequests();
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name reconnectTimeout
+	     * @private
+	     * @type {number}
+	     */
+	    var reconnectTimeout = null;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name maxReconnectTimeout
+	     * @private
+	     * @type {number}
+	     */
+	    var maxReconnectTimeout = 5 * 60 * 1000;
+	    /**
+	     * Rejects a message if the body size is greater than this. It is enforced servcer side, so changing this
+	     * won't make the bodySizeLimit any bigger, this just gives you a senseable error if it's too big.
+	     * @memberof! respoke.signalingChannel
+	     * @name bodySizeLimit
+	     * @private
+	     * @type {number}
+	     */
+	    var bodySizeLimit = 20000;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name appId
+	     * @private
+	     * @type {string}
+	     */
+	    var appId = null;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name endpointId
+	     * @private
+	     * @type {string}
+	     */
+	    var endpointId = null;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name token
+	     * @private
+	     * @type {string}
+	     */
+	    var token = null;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name appToken
+	     * @private
+	     * @type {string}
+	     */
+	    var appToken = null;
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name xhr
+	     * @private
+	     * @type {XMLHttpRequest}
+	     */
+	    var xhr = new XMLHttpRequest();
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name routingMethods
+	     * @private
+	     * @type {object}
+	     * @desc The methods contained in this object are statically defined methods that are called by constructing
+	     * their names dynamically. 'do' + $className + $signalType == 'doCallOffer', et. al.
+	     */
+	    var routingMethods = {};
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name handlerQueue
+	     * @private
+	     * @type {object}
+	     */
+	    var handlerQueue = {
+	        'message': [],
+	        'signal': [],
+	        'presence': []
+	    };
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @name errors
+	     * @private
+	     * @type {object}
+	     */
+	    var errors = {
+	        400: "Can't perform this action: missing or invalid parameters.",
+	        401: "Can't perform this action: not authenticated.",
+	        403: "Can't perform this action: not authorized.",
+	        404: "Item not found.",
+	        409: "Can't perform this action: item in the wrong state.",
+	        429: "API rate limit was exceeded.",
+	        500: "Can't perform this action: server problem."
+	    };
+
+	    /**
+	     * Indicate whether the signaling channel has a valid connection to Respoke.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.isConnected
+	     * @return {boolean}
+	     */
+	    that.isConnected = function () {
+	        return !!(that.socket && that.socket.socket.connected);
+	    };
+
+	    /**
+	     * Indicate whether the signaling channel is currently waiting on a websocket to connect.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.isConnecting
+	     * @private
+	     * @return {boolean}
+	     */
+	    function isConnecting() {
+	        return !!(that.socket && that.socket.socket.connecting);
+	    }
+
+	    /**
+	     * Get the call debug preference.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.isSendingReport
+	     * @private
+	     * @return {boolean}
+	     */
+	    that.isSendingReport = function (params) {
+	        return clientSettings.enableCallDebugReport;
+	    };
+
+	    /**
+	     * Open a connection to the REST API and validate the app, creating a session token.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.open
+	     * @private
+	     * @param {object} params
+	     * @param {string} [params.token] - The Endpoint's auth token
+	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
+	     * endpoint. This is only used when `developmentMode` is set to `true`.
+	     * @return {Promise}
+	     */
+	    that.open = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        log.debug('SignalingChannel.open', params, clientSettings);
+	        token = params.token || token;
+	        actuallyConnect = typeof params.actuallyConnect === 'function' ? params.actuallyConnect : actuallyConnect;
+
+	        Q.fcall(function tokenPromise() {
+	            if (clientSettings.developmentMode === true && clientSettings.appId && params.endpointId) {
+	                return that.getToken({
+	                    appId: clientSettings.appId,
+	                    endpointId: params.endpointId
+	                });
+	            }
+	            return null;
+	        }).then(function successHandler(newToken) {
+	            token = newToken || token;
+	            return doOpen({token: token});
+	        }).done(function successHandler() {
+	            deferred.resolve();
+	            log.debug('client', client);
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Get a developer mode token for an endpoint. App must be in developer mode.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.getToken
+	     * @private
+	     * @param {object} params
+	     * @param {string} [params.endpointId] - An identifier to use when creating an authentication token for this
+	     * endpoint. This is only used when `developmentMode` is set to `true`.
+	     * @return {Promise<String>}
+	     */
+	    that.getToken = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        log.debug('SignalingChannel.getToken', params);
+
+	        var callParams = {
+	            path: '/v1/tokens',
+	            httpMethod: 'POST',
+	            parameters: {
+	                appId: clientSettings.appId,
+	                endpointId: params.endpointId,
+	                ttl: 60 * 60 * 6
+	            }
+	        };
+
+	        call(callParams).done(function (response) {
+	            if (response.statusCode === 200 && response.body && response.body.tokenId) {
+	                token = response.body.tokenId;
+	                deferred.resolve(response.body.tokenId);
+	                return;
+	            }
+
+	            var errorMessage = "Couldn't get a developer mode token. ";
+	            if (isBillingSuspensionUnauthorizedResponse(response)) {
+	                errorMessage += billingSuspensionErrorMessage;
+	            } else if (isSuspensionUnauthorizedResponse(response)) {
+	                errorMessage += suspensionErrorMessage;
+	            } else {
+	                errorMessage += response.error;
+	            }
+
+	            deferred.reject(buildResponseError(response, errorMessage));
+	        }, function (err) {
+	            deferred.reject(new Error("Couldn't get a developer mode token. " + err.message));
+	        });
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Open a connection to the REST API and validate the app, creating a session token.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.doOpen
+	     * @param {object} params
+	     * @param {string} params.token - The Endpoint's auth token
+	     * @return {Promise}
+	     * @private
+	     */
+	    function doOpen(params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        log.debug('SignalingChannel.doOpen', params);
+
+	        if (!params.token) {
+	            deferred.reject(new Error("Can't open connection to Respoke without a token."));
+	            return deferred.promise;
+	        }
+
+	        call({
+	            path: '/v1/session-tokens',
+	            httpMethod: 'POST',
+	            parameters: {
+	                tokenId: params.token
+	            }
+	        }).done(function (response) {
+	            if (response.statusCode === 200) {
+	                appToken = response.body.token;
+	                deferred.resolve();
+	                log.debug("Signaling connection open to", clientSettings.baseURL);
+	                return;
+	            }
+
+	            var errorMessage = "Couldn't authenticate app. ";
+	            if (isBillingSuspensionUnauthorizedResponse(response)) {
+	                errorMessage += billingSuspensionErrorMessage;
+	            } else if (isSuspensionUnauthorizedResponse(response)) {
+	                errorMessage += suspensionErrorMessage;
+	            } else {
+	                errorMessage += response.error;
+	            }
+
+	            deferred.reject(buildResponseError(response, errorMessage));
+	        }, function (err) {
+	            log.error("Network call failed:", err.message);
+	            deferred.reject(new Error("Couldn't authenticate app. " + err.message));
+	        });
+
+	        return deferred.promise;
+	    }
+
+	    /**
+	     * Close a connection to the REST API. Invalidate the session token.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.close
+	     * @private
+	     * @return {Promise}
+	     */
+	    that.close = function () {
+	        var deferred = Q.defer();
+
+	        wsCall({
+	            path: '/v1/connections/{id}/',
+	            httpMethod: 'DELETE',
+	            urlParams: {
+	                id: client.endpointId
+	            }
+	        }).fin(function finallyHandler() {
+	            return call({
+	                path: '/v1/session-tokens',
+	                httpMethod: 'DELETE'
+	            });
+	        }).fin(function finallyHandler() {
+	            if (that.socket) {
+	                that.socket.removeAllListeners();
+	                that.socket.disconnect();
+	            }
+	            that.socket = null;
+	            deferred.resolve();
+	        }).done();
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Generate and send a presence message representing the client's current status. This triggers
+	     * the server to send the client's endpoint's presence.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendPresence
+	     * @private
+	     * @param {object} params
+	     * @param {string|number|object|Array} [params.presence=available]
+	     * @param {string} [params.status] - Non-enumeration human-readable status.
+	     * @param {string} [params.show] - I can't remember what this is.
+	     * @returns {Promise}
+	     */
+	    that.sendPresence = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        log.debug("Signaling sendPresence");
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            path: '/v1/presence',
+	            httpMethod: 'POST',
+	            parameters: {
+	                'presence': {
+	                    show: params.show,
+	                    'status': params.status,
+	                    type: params.presence || "available"
+	                }
+	            }
+	        }).done(function successHandler() {
+	            deferred.resolve();
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * If the logged-in endpoint has permission through its Respoke role, forcibly remove another participant
+	     * from the conference, ending its conference call.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.removeConferenceParticipant
+	     * @private
+	     * @param {object} params
+	     * @param {string} [endpointId] - The endpoint id of the endpoint to be removed
+	     * @param {string} [connectionId] - The connection id of the connection to be removed
+	     * @returns {Promise}
+	     */
+	    that.removeConferenceParticipant = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var endpointId = params.endpointId;
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        if (!endpointId && params.connectionId) {
+	            try {
+	                endpointId = client.getConnection({
+	                    connectionId: params.connectionId
+	                }).getEndpoint().id;
+	            } catch (err) {}
+
+	            if (!endpointId) {
+	                deferred.reject(new Error("conference.removeParticipant can't figure out what endpoint to remove!"));
+	                return deferred.promise;
+	            }
+	        }
+
+	        wsCall({
+	            httpMethod: 'DELETE',
+	            path: '/v1/conferences/{id}/participants/{endpointId}',
+	            urlParams: {
+	                id: params.conferenceId,
+	                endpointId: endpointId
+	            },
+	            parameters: {
+	                connectionId: params.connectionId // Optional; It's OK if it's undefined here.
+	            }
+	        }).then(function successHandler() {
+	            deferred.resolve();
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * If the logged-in endpoint has permission through its Respoke role, close down the conference, removing all
+	     * participants.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.destroyConference
+	     * @param {object} params
+	     * @param {string} params.id
+	     * @private
+	     * @returns {Promise}
+	     */
+	    that.destroyConference = function (params) {
+	        var deferred = Q.defer();
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            httpMethod: 'DELETE',
+	            path: '/v1/conferences/{id}/',
+	            urlParams: { id: params.conferenceId }
+	        }).then(function successHandler() {
+	            deferred.resolve();
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Retrieve the list of participants in the specified conference.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.getConferenceParticipants
+	     * @private
+	     * @returns {Promise<respoke.Connection>}
+	     * @param {object} params
+	     * @param {string} params.id
+	     */
+	    that.getConferenceParticipants = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            httpMethod: 'GET',
+	            path: '/v1/conferences/{id}/participants/',
+	            urlParams: { id: params.id }
+	        }).then(function successHandler(participants) {
+	            deferred.resolve(participants.map(function (par) {
+	                return client.getConnection({
+	                    connectionId: par.connectionId,
+	                    endpointId: par.endpointId
+	                });
+	            }));
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Get or create a group in the infrastructure.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.getGroup
+	     * @private
+	     * @returns {Promise<respoke.Group>}
+	     * @param {object} params
+	     * @param {string} params.name
+	     */
+	    that.getGroup = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            httpMethod: 'POST',
+	            path: '/v1/channels/',
+	            parameters: {
+	                name: params.name
+	            }
+	        }).then(function successHandler(group) {
+	            deferred.resolve(group);
+	        }, function errorHandler(err) {
+	            // Group was already created, just return back the same params we were given.
+	            deferred.resolve({id: params.name});
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Leave a group. In order to aggregate subsequent repeated requests, this function, when called synchronously,
+	     * will continue to accumulate group ids until the next tick of the event loop, when the request will be
+	     * issued. The same instance of Promise is returned each time.
+	     * @memberof! respoke.SignalingChannel
+	     * @private
+	     * @method respoke.SignalingChannel.leaveGroup
+	     * @returns {Promise}
+	     * @param {object} params
+	     * @param {array} params.groupList
+	     */
+	    that.leaveGroup = (function () {
+	        var groups = {};
+	        var deferred = Q.defer();
+
+	        return function (params) {
+	            params = params || {};
+	            params.groupList = params.groupList || [];
+
+	            var toRun = (Object.keys(groups).length === 0);
+
+	            if (!that.isConnected()) {
+	                deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	                return deferred.promise;
+	            }
+
+	            params.groupList.forEach(function (id) {
+	                if (typeof id === 'string') {
+	                    groups[id] = true;
+	                }
+	            });
+
+	            if (!toRun) {
+	                return deferred.promise;
+	            }
+
+	            setTimeout(function () {
+	                // restart accumulation
+	                var groupList = Object.keys(groups);
+	                groups = {};
+	                var saveDeferred = deferred;
+	                deferred = Q.defer();
+
+	                if (groupList.length === 0) {
+	                    saveDeferred.resolve();
+	                    return;
+	                }
+
+	                wsCall({
+	                    path: '/v1/groups/',
+	                    parameters: {
+	                        groups: groupList
+	                    },
+	                    httpMethod: 'DELETE'
+	                }).done(function successHandler() {
+	                    saveDeferred.resolve();
+	                }, function errorHandler(err) {
+	                    saveDeferred.reject(err);
+	                });
+	            });
+	            return deferred.promise;
+	        };
+	    })();
+
+	    /**
+	     * Join a group. In order to aggregate subsequent repeated requests, this function, when called synchronously,
+	     * will continue to accumulate group ids until the next tick of the event loop, when the request will be
+	     * issued. The same instance of Promise is returned each time.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.joinGroup
+	     * @private
+	     * @returns {Promise}
+	     * @param {object} params
+	     * @param {array} params.groupList
+	     */
+	    that.joinGroup = (function () {
+	        var groups = {};
+	        var deferred = Q.defer();//i think this needs to go in actualJoinGroup
+
+	        return function actualJoinGroup(params) {
+	            params = params || {};
+	            params.groupList = params.groupList || [];
+
+	            log.trace('been asked to join groups', params.groupList);
+
+	            var needsToRun = (Object.keys(groups).length === 0);
+
+	            if (!that.isConnected()) {
+	                deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	                return deferred.promise;
+	            }
+
+	            params.groupList.forEach(function (id) {
+	                if (typeof id === 'string') {
+	                    log.trace('put group', id, 'in the join queue');
+	                    groups[id] = true;
+	                }
+	            });
+
+	            if (!needsToRun) {
+	                return deferred.promise;
+	            }
+
+	            setTimeout(function requestJoinsForGroupQueue() {
+	                // restart accumulation
+	                var groupList = Object.keys(groups);
+	                log.trace('list of groups to be requested', groupList);
+	                //reset the groups object
+	                groups = {};
+	                var saveDeferred = deferred;
+	                deferred = Q.defer();
+
+	                if (groupList.length === 0) {
+	                    log.trace('list of groups was empty so not sending queue');
+	                    saveDeferred.resolve();
+	                    return;
+	                }
+
+	                wsCall({
+	                    path: '/v1/groups/',
+	                    parameters: {
+	                        groups: groupList
+	                    },
+	                    httpMethod: 'POST'
+	                }).done(function successHandler() {
+	                    saveDeferred.resolve();
+	                }, function errorHandler(err) {
+	                    saveDeferred.reject(err);
+	                });
+	            });
+	            return deferred.promise;
+	        };
+	    })();
+
+	    /**
+	     * Publish a message to a group.
+	     * @memberof! respoke.SignalingChannel
+	     * @private
+	     * @method respoke.SignalingChannel.publish
+	     * @returns {Promise}
+	     * @param {object} params
+	     * @param {string} params.id
+	     * @param {string} params.message
+	     * @param {boolean} [params.push=false]
+	     */
+	    that.publish = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var message = respoke.TextMessage({
+	            endpointId: params.id,
+	            message: params.message,
+	            push: !!params.push
+	        });
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            path: '/v1/channels/{id}/publish/',
+	            urlParams: { id: params.id },
+	            httpMethod: 'POST',
+	            parameters: message
+	        }).done(function successHandler() {
+	            deferred.resolve();
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Register as an observer of presence for the specified endpoint ids. In order to aggregate subsequent repeated
+	     * requests, this function, when called synchronously, will continue to accumulate endpoint ids until the next
+	     * tick of the event loop, when the request will be issued. The same instance of Promise is returned each time.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.registerPresence
+	     * @private
+	     * @param {object} params
+	     * @param {Array<string>} params.endpointList
+	     * @returns {Promise}
+	     */
+	    that.registerPresence = (function () {
+	        var endpoints = {};
+	        var deferred = Q.defer();
+
+	        return function (params) {
+	            params = params || {};
+	            params.endpointList = params.endpointList || [];
+	            var toRun = (Object.keys(endpoints).length === 0);
+
+	            if (!that.isConnected()) {
+	                return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            }
+
+	            params.endpointList.forEach(function (ep) {
+	                if (typeof ep === 'string' && presenceRegistered[ep] !== true) {
+	                    endpoints[ep] = true;
+	                }
+	            });
+
+	            if (!toRun) {
+	                return deferred.promise;
+	            }
+
+	            setTimeout(function () {
+	                // restart accumulation
+	                var endpointList = Object.keys(endpoints);
+	                endpoints = {};
+	                var saveDeferred = deferred;
+	                deferred = Q.defer();
+
+	                if (endpointList.length === 0) {
+	                    saveDeferred.resolve();
+	                    return;
+	                }
+
+	                wsCall({
+	                    httpMethod: 'POST',
+	                    path: '/v1/presenceobservers',
+	                    parameters: {
+	                        endpointList: endpointList
+	                    }
+	                }).done(function successHandler() {
+	                    params.endpointList.forEach(function eachId(id) {
+	                        presenceRegistered[id] = true;
+	                    });
+	                    saveDeferred.resolve();
+	                }, function (err) {
+	                    saveDeferred.reject(err);
+	                });
+	                // We could even add a tiny delay like 10ms if we want to get more conservative and
+	                // catch asychronous calls to client.getEndpoint() and other methods which call
+	                // this method.
+	            });
+
+	            return deferred.promise;
+	        };
+	    })();
+
+	    /**
+	     * Join a group.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.getGroupMembers
+	     * @private
+	     * @returns {Promise<Array>}
+	     * @param {object} params
+	     * @param {string} params.id
+	     */
+	    that.getGroupMembers = function (params) {
+	        var deferred = Q.defer();
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        if (!params.id) {
+	            deferred.reject(new Error("Can't get group's endpoints without group ID."));
+	            return deferred.promise;
+	        }
+
+	        return wsCall({
+	            path: '/v1/channels/{id}/subscribers/',
+	            urlParams: { id: params.id },
+	            httpMethod: 'GET'
+	        });
+	    };
+
+	    /**
+	     * Send a chat message.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendMessage
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.SignalingMessage} params.message - The string text message to send.
+	     * @param {respoke.Endpoint} params.recipient
+	     * @param {string} [params.connectionId]
+	     * @param {boolean} [params.push=false]
+	     * @returns {Promise}
+	     */
+	    that.sendMessage = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var message = respoke.TextMessage({
+	            endpointId: params.recipient.id,
+	            ccSelf: params.ccSelf,
+	            connectionId: params.connectionId,
+	            message: params.message,
+	            push: !!params.push
+	        });
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            path: '/v1/messages',
+	            httpMethod: 'POST',
+	            parameters: message
+	        }).done(function successHandler() {
+	            deferred.resolve();
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Send an ACK signal to acknowlege reception of a signal.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendACK
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.SignalingMessage} params.signal
+	     * @return {Promise}
+	     */
+	    that.sendACK = function (params) {
+	        var endpoint;
+	        params = params || {};
+
+	        if (!that.isConnected()) {
+	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	        }
+
+	        if (!params.signal) {
+	            return Q.reject(new Error("Can't send ACK, no signal was given."));
+	        }
+
+	        endpoint = client.getEndpoint({
+	            id: params.signal.fromEndpoint,
+	            skipPresence: true
+	        });
+	        if (!endpoint) {
+	            return Q.reject(new Error("Can't send ACK, can't get endpoint."));
+	        }
+
+	        return that.sendSignal({
+	            recipient: endpoint,
+	            signalType: 'ack',
+	            signalId: params.signal.signalId,
+	            sessionId: params.signal.sessionId,
+	            target: params.signal.target,
+	            ackedSignalType: params.signal.signalType
+	        });
+	    };
+
+	    /**
+	     * Send a signaling message.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendSignal
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.Call} [params.call] - For getting the sessionId & connectionId. Not required for 'ack'.
+	     * @return {Promise}
+	     */
+	    that.sendSignal = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var signal;
+	        var to;
+	        var toConnection;
+	        var toType;
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        if (params.call) {
+	            params.sessionId = params.call.id;
+	            if (params.call.connectionId) { // the recipient's connectionId
+	                params.connectionId = params.call.connectionId;
+	            }
+	        }
+
+	        to = params.recipient.id;
+	        toConnection = params.connectionId;
+	        toType = params.toType || 'web';
+
+	        try {
+	            params.signalId = respoke.makeGUID();
+	            // This will strip off non-signaling attributes.
+	            signal = respoke.SignalingMessage(params);
+	        } catch (e) {
+	            deferred.reject(e);
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            path: '/v1/signaling',
+	            httpMethod: 'POST',
+	            parameters: {
+	                ccSelf: params.ccSelf,
+	                signal: JSON.stringify(signal),
+	                to: to,
+	                toConnection: toConnection,
+	                toType: toType
+	            }
+	        }).done(function successHandler() {
+	            deferred.resolve();
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Send an ICE candidate.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendCandidate
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.Endpoint} params.recipient - The recipient.
+	     * @param {string} [params.connectionId]
+	     * @param {Array<RTCIceCandidate>} params.iceCandidates - An array of ICE candidate.
+	     * @return {Promise}
+	     */
+	    that.sendCandidate = function (params) {
+	        params = params || {};
+	        params.signalType = 'iceCandidates';
+
+	        if (!that.isConnected()) {
+	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	        }
+
+	        if (typeof params.finalCandidates !== 'undefined') {
+	            log.debug('Sending final', params.iceCandidates.length, 'of', params.finalCandidates.length, 'ice candidates');
+	        } else {
+	            log.debug('Sending', params.iceCandidates.length, 'ice candidates');
+	        }
+
+	        return that.sendSignal(params);
+	    };
+
+	    /**
+	     * Send an SDP.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendSDP
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.Endpoint} params.recipient - The recipient.
+	     * @param {string} [params.connectionId]
+	     * @param {RTCSessionDescription} params.sessionDescription - An SDP to JSONify and send.
+	     * @return {Promise}
+	     */
+	    that.sendSDP = function (params) {
+	        params = params || {};
+
+	        if (!that.isConnected()) {
+	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	        }
+
+	        if (['offer', 'answer'].indexOf(params.signalType) === -1) {
+	            return Q.reject("Not an SDP type signal.");
+	        }
+
+	        return that.sendSignal(params);
+	    };
+
+	    /**
+	     * Send a call report to the cloud infrastructure.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendReport
+	     * @private
+	     * @param {object} params
+	     * @todo TODO document the params.
+	     * @return {Promise}
+	     */
+	    that.sendReport = function (params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var message = {
+	            debugData: params
+	        };
+
+	        if (!clientSettings.enableCallDebugReport) {
+	            log.debug('not sending call debugs - disabled');
+	            deferred.resolve();
+	            return deferred.promise;
+	        }
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            path: '/v1/call-debugs',
+	            httpMethod: 'POST',
+	            parameters: message
+	        }).done(function () {
+	            deferred.resolve();
+	        }, function (err) {
+	            deferred.reject(err);
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Send a message hanging up the WebRTC session.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendHangup
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.Endpoint} params.recipient - The recipient.
+	     * @param {string} [params.connectionId]
+	     * @param {string} params.reason - The reason the session is being hung up.
+	     * @return {Promise}
+	     */
+	    that.sendHangup = function (params) {
+	        params = params || {};
+	        params.signalType = 'bye';
+	        params.ccSelf = true;
+
+	        if (!that.isConnected()) {
+	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	        }
+
+	        return that.sendSignal(params);
+	    };
+
+	    /**
+	     * Send a message to all connection ids indicating we have negotiated a call with one connection.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendConnected
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.Endpoint} params.recipient - The recipient.
+	     * @return {Promise}
+	     */
+	    that.sendConnected = function (params) {
+	        params = params || {};
+	        params.signalType = 'connected';
+
+	        if (!that.isConnected()) {
+	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	        }
+
+	        return that.sendSignal(params);
+	    };
+
+	    /**
+	     * Send a message to the remote party indicating a desire to renegotiate media.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.sendModify
+	     * @private
+	     * @param {object} params
+	     * @param {respoke.Endpoint} params.recipient - The recipient.
+	     * @param {string} params.action - The state of the modify request, one of: 'initiate', 'accept', 'reject'
+	     * @return {Promise}
+	     */
+	    that.sendModify = function (params) {
+	        params = params || {};
+	        params.signalType = 'modify';
+
+	        if (['initiate', 'accept', 'reject'].indexOf(params.action) === -1) {
+	            return Q.reject("No valid action in modify signal.");
+	        }
+
+	        if (!that.isConnected()) {
+	            return Q.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	        }
+
+	        return that.sendSignal(params);
+	    };
+
+	    /**
+	     * Uppercase the first letter of the word.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.firstUpper
+	     * @private
+	     */
+	    function firstUpper(str) {
+	        return str[0].toUpperCase() + str.slice(1);
+	    }
+
+	    /**
+	     * Route different types of signaling messages via events.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routeSignal
+	     * @private
+	     * @param {respoke.SignalingMessage} message - A message to route
+	     * @fires respoke.Call#offer
+	     * @fires respoke.Call#connected
+	     * @fires respoke.Call#answer
+	     * @fires respoke.Call#iceCandidates
+	     * @fires respoke.Call#hangup
+	     * @fires respoke.DirectConnection#offer
+	     * @fires respoke.DirectConnection#connected
+	     * @fires respoke.DirectConnection#answer
+	     * @fires respoke.DirectConnection#iceCandidates
+	     * @fires respoke.DirectConnection#hangup
+	     */
+	    that.routeSignal = function (signal) {
+	        var target = null;
+	        var method = 'do';
+
+	        if (signal.signalType !== 'iceCandidates' || respoke.ridiculous) { // Too many of these!
+	            log.debug(signal.signalType, signal);
+	        }
+
+	        if (signal.target === undefined) {
+	            throw new Error("target undefined");
+	        }
+
+	        // Only create if this signal is an offer.
+	        Q.fcall(function makePromise() {
+	            var endpoint;
+	            /*
+	             * This will return calls regardless of whether they are associated
+	             * with a direct connection or not, and it will create a call if no
+	             * call is found and this signal is an offer. Direct connections get
+	             * created in the next step.
+	             *
+	             * signal.toOriginal will be undefined except in the case that another connection
+	             * with our same endpointId has just hung up on the call.
+	             */
+	            target = client.getCall({
+	                id: signal.sessionId,
+	                endpointId: signal.toOriginal || signal.fromEndpoint,
+	                target: signal.target,
+	                conferenceId: signal.conferenceId,
+	                type: signal.fromType,
+	                create: (signal.target !== 'directConnection' && signal.signalType === 'offer'),
+	                callerId: signal.callerId
+	            });
+	            if (target) {
+	                return target;
+	            }
+
+	            if (signal.target === 'directConnection') {
+	                // return a promise
+	                endpoint = client.getEndpoint({
+	                    id: signal.fromEndpoint,
+	                    skipPresence: true
+	                });
+
+	                if (endpoint.directConnection && endpoint.directConnection.call.id === signal.sessionId) {
+	                    return endpoint.directConnection;
+	                }
+
+	                return endpoint.startDirectConnection({
+	                    id: signal.sessionId,
+	                    create: (signal.signalType === 'offer'),
+	                    caller: (signal.signalType !== 'offer')
+	                });
+	            }
+	        }).done(function successHandler(target) {
+	            // target might be null, a Call, or a DirectConnection.
+	            if (target) {
+	                target = target.call || target;
+	            }
+	            if (!target || target.id !== signal.sessionId) {
+	                // orphaned signal
+	                log.warn("Couldn't associate signal with a call. This is usually OK.", signal);
+	                return;
+	            }
+
+	            method += firstUpper(signal.signalType);
+	            routingMethods[method]({
+	                call: target,
+	                signal: signal
+	            });
+	        }, null);
+	    };
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routingMethods.doOffer
+	     * @private
+	     * @params {object} params
+	     * @params {object} params.signal
+	     * @fires respoke.Call#signal-offer
+	     */
+	    routingMethods.doOffer = function (params) {
+	        params.call.connectionId = params.signal.fromConnection;
+	        /**
+	         * Send the `offer` signal into the Call.
+	         * @event respoke.Call#signal-offer
+	         * @type {respoke.Event}
+	         * @property {object} signal
+	         * @property {string} name - the event name.
+	         * @property {respoke.Call} target
+	         */
+	        params.call.fire('signal-offer', {
+	            signal: params.signal
+	        });
+	    };
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routingMethods.doConnected
+	     * @private
+	     * @params {object} params
+	     * @params {object} params.signal
+	     * @fires respoke.Call#signal-connected
+	     */
+	    routingMethods.doConnected = function (params) {
+	        /**
+	         * Send the `connected` signal into the Call.
+	         * @event respoke.Call#signal-connected
+	         * @type {respoke.Event}
+	         * @property {object} signal
+	         * @property {string} name - the event name.
+	         * @property {respoke.Call} target
+	         */
+	        params.call.fire('signal-connected', {
+	            signal: params.signal
+	        });
+	    };
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routingMethods.dModify
+	     * @private
+	     * @params {object} params
+	     * @params {object} params.signal
+	     * @fires respoke.Call#signal-modify
+	     */
+	    routingMethods.doModify = function (params) {
+	        /**
+	         * Send the `modify` signal into the Call.
+	         * @event respoke.Call#signal-modify
+	         * @type {respoke.Event}
+	         * @property {object} signal
+	         * @property {string} name - the event name.
+	         * @property {respoke.Call} target
+	         */
+	        params.call.fire('signal-modify', {
+	            signal: params.signal
+	        });
+	    };
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routingMethods.doAnswer
+	     * @private
+	     * @params {object} params
+	     * @params {object} params.signal
+	     * @fires respoke.Call#signal-answer
+	     */
+	    routingMethods.doAnswer = function (params) {
+	        params.call.connectionId = params.signal.fromConnection;
+	        /**
+	         * Send the `answer` signal into the Call.
+	         * @event respoke.Call#signal-answer
+	         * @type {respoke.Event}
+	         * @property {object} signal
+	         * @property {string} name - the event name.
+	         * @property {respoke.Call} target
+	         */
+	        params.call.fire('signal-answer', {
+	            signal: params.signal
+	        });
+	    };
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routingMethods.doIceCandidates
+	     * @private
+	     * @params {object} params
+	     * @params {object} params.signal
+	     * @fires respoke.Call#signal-icecandidates
+	     */
+	    routingMethods.doIceCandidates = function (params) {
+	        /**
+	         * Send the `icecandidates` signal into the Call.
+	         * @event respoke.Call#signal-icecandidates
+	         * @type {respoke.Event}
+	         * @property {object} signal
+	         * @property {string} name - the event name.
+	         * @property {respoke.Call} target
+	         */
+	        params.call.fire('signal-icecandidates', {
+	            signal: params.signal
+	        });
+	    };
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routingMethods.doBye
+	     * @private
+	     * @params {object} params
+	     * @params {object} params.signal
+	     * @fires respoke.Call#signal-hangup
+	     */
+	    routingMethods.doBye = function (params) {
+	        /**
+	         *  The caller may receive hangup from one or more parties after connectionId is set if the call is rejected
+	         *  by a connection that didn't win the call. In this case, we have to ignore the signal since
+	         *  we are already on a call.
+	         *
+	         *  The callee's connectionId is always set.
+	         */
+	        if (params.call.caller && params.call.connectionId &&
+	                params.call.connectionId !== params.signal.fromConnection) {
+	            return;
+	        }
+	        /**
+	         * Send the `hangup` signal into the Call.
+	         * @event respoke.Call#signal-hangup
+	         * @type {respoke.Event}
+	         * @property {object} signal
+	         * @property {string} name - the event name.
+	         * @property {respoke.Call} target
+	         */
+	        params.call.fire('signal-hangup', {
+	            signal: params.signal
+	        });
+	    };
+
+	    /**
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.routingMethods.doUnknown
+	     * @private
+	     * @params {object} params
+	     * @params {object} params.signal
+	     */
+	    routingMethods.doUnknown = function (params) {
+	        log.error("Don't know what to do with", params.signal.target, "msg of unknown type", params.signal.signalType);
+	    };
+
+	    /**
+	     * Add a handler to the connection for messages of different types.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.addHandler
+	     * @private
+	     * @param {object} params
+	     * @param {string} params.type - The type of socket message, i. e., 'message', 'presence', 'join'
+	     * @param {function} params.handler - A function to which to pass the message
+	     * @todo TODO See if this is necessary anymore
+	     */
+	    that.addHandler = function (params) {
+	        if (that.socket.socket && that.socket.socket.open) {
+	            that.socket.on(params.type, params.handler);
+	        } else {
+	            handlerQueue[params.type].push(params.handler);
+	        }
+	    };
+
+	    /**
+	     * Socket handler for pub-sub messages.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.socketOnPubSub
+	     * @param {object} message The Socket.io message.
+	     * @private
+	     * @fires respoke.Group#message
+	     * @fires respoke.Client#message
+	     */
+	    function socketOnPubSub(message) {
+	        var group;
+	        var groupMessage = respoke.TextMessage({
+	            rawMessage: message
+	        });
+
+	        group = client.getGroup({id: message.header.channel});
+	        if (group) {
+	            /**
+	             * Indicate that a message has been received to a group.
+	             * @event respoke.Group#message
+	             * @type {respoke.Event}
+	             * @property {respoke.TextMessage} message
+	             * @property {string} name - the event name.
+	             * @property {respoke.Group} target
+	             */
+	            group.fire('message', {
+	                message: groupMessage
+	            });
+	        }
+	        /**
+	         * Indicate that a message has been received.
+	         * @event respoke.Client#message
+	         * @type {respoke.Event}
+	         * @property {respoke.TextMessage} message
+	         * @property {respoke.Group} [group] - If the message is to a group we already know about,
+	         * this will be set. If null, the developer can use client.join({id: evt.message.header.channel}) to join
+	         * the group. From that point forward, Group#message will fire when a message is received as well. If
+	         * group is undefined instead of null, the message is not a group message at all.
+	         * @property {string} name - the event name.
+	         * @property {respoke.Client} target
+	         */
+	        client.fire('message', {
+	            message: groupMessage,
+	            group: group || null
+	        });
+	    }
+	    that.socketOnPubSub = socketOnPubSub;
+
+	    /**
+	     * Socket handler for join messages.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.socketOnJoin
+	     * @param {object} message The Socket.io message.
+	     * @private
+	     */
+	    function socketOnJoin(message) {
+	        var group;
+	        var presenceMessage;
+	        var endpoint;
+	        var connection;
+
+	        if (message.connectionId === client.connectionId) {
+	            connection = client.getConnection({connectionId: message.connectionId, endpointId: message.endpointId});
+	            group = client.getGroup({id: message.header.channel});
+	            if (!group) {
+	                group = respoke.Group({
+	                    id: message.header.channel,
+	                    instanceId: instanceId,
+	                    signalingChannel: that
+	                });
+	                client.addGroup(group);
+	            }
+	            if (!group.isJoined()) {
+	                group.addMember({connection: connection});
+	                client.fire('join', {
+	                    group: group
+	                });
+	            }
+	        } else {
+
+	            endpoint = client.getEndpoint({
+	                skipPresence: true,
+	                id: message.endpointId,
+	                instanceId: instanceId,
+	                name: message.endpointId
+	            });
+
+	            // Handle presence not associated with a channel
+	            if (!connection) {
+	                endpoint.setPresence({
+	                    connectionId: message.connectionId
+	                });
+	                connection = client.getConnection({
+	                    connectionId: message.connectionId,
+	                    endpointId: message.endpointId
+	                });
+	            }
+
+	            group = client.getGroup({id: message.header.channel});
+
+	            if (group && connection) {
+	                group.addMember({connection: connection});
+	            } else {
+	                log.error("Can't add endpoint to group:", message, group, endpoint, connection);
+	            }
+	        }
+	    }
+	    that.socketOnJoin = socketOnJoin;
+
+	    /**
+	     * Socket handler for leave messages.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.socketOnLeave
+	     * @param {object} message The Socket.io message.
+	     * @private
+	     */
+	    function socketOnLeave(message) {
+	        var group;
+	        var presenceMessage;
+	        var endpoint;
+	        if (message.connectionId === client.connectionId) {
+	            group = client.getGroup({id: message.header.channel});
+	            client.fire('leave', {
+	                group: group
+	            });
+	        } else {
+
+	            endpoint = client.getEndpoint({
+	                skipPresence: true,
+	                id: message.endpointId
+	            });
+
+	            endpoint.connections.every(function eachConnection(conn, index) {
+	                if (conn.id === message.connectionId) {
+	                    endpoint.connections.splice(index, 1);
+	                    return false;
+	                }
+	                return true;
+	            });
+
+	            group = client.getGroup({id: message.header.channel});
+	            if (group) {
+	                group.removeMember({connectionId: message.connectionId});
+	            }
+	        }
+	    }
+	    that.socketOnLeave = socketOnLeave;
+
+	    /**
+	     * Socket handler for presence messages.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.onMessage
+	     * @param {object} message The Socket.io message.
+	     * @private
+	     * @fires respoke.Endpoint#message
+	     * @fires respoke.Client#message
+	     */
+	    function socketOnMessage(message) {
+	        var endpoint;
+	        message = respoke.TextMessage({rawMessage: message});
+	        if (message.originalRecipient || message.endpointId) {
+	            endpoint = client.getEndpoint({
+	                id: message.originalRecipient || message.endpointId,
+	                skipCreate: true
+	            });
+	        }
+	        if (endpoint) {
+	            /**
+	             * Indicate that a message has been received.
+	             * @event respoke.Endpoint#message
+	             * @type {respoke.Event}
+	             * @property {respoke.TextMessage} message
+	             * @property {string} name - the event name.
+	             * @property {respoke.Endpoint} target
+	             */
+	            endpoint.fire('message', {
+	                message: message
+	            });
+	        }
+	        /**
+	         * Indicate that a message has been received.
+	         * @event respoke.Client#message
+	         * @type {respoke.Event}
+	         * @property {respoke.TextMessage} message
+	         * @property {respoke.Endpoint} [endpoint] - If the message is from an endpoint we already know about,
+	         * this will be set. If null, the developer can use client.getEndpoint({id: evt.message.endpointId}) to get
+	         * the Endpoint. From that point forward, Endpoint#message will fire when a message is received as well.
+	         * @property {string} name - the event name.
+	         * @property {respoke.Client} target
+	         */
+	        client.fire('message', {
+	            endpoint: endpoint || null,
+	            message: message
+	        });
+	    }
+	    that.socketOnMessage = socketOnMessage;
+
+	    /**
+	     * Create a socket handler for the onConnect event with all the right things in scope.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.generateConnectHandler
+	     * @param {respoke.Client.successHandler} [onSuccess] - Success handler for this invocation of
+	     * this method only.
+	     * @param {respoke.Client.errorHandler} [onError] - Error handler for this invocation of this
+	     * method only.
+	     * @private
+	     */
+	    var generateConnectHandler = function generateConnectHandler(onSuccess, onError) {
+	        onSuccess = onSuccess || function () {};
+	        onError = onError || function () {};
+	        return function onConnect() {
+	            Object.keys(handlerQueue).forEach(function addEachHandlerType(category) {
+	                if (!handlerQueue[category]) {
+	                    return;
+	                }
+
+	                handlerQueue[category].forEach(function addEachHandler(handler) {
+	                    that.socket.on(category, handler);
+	                });
+	                handlerQueue[category] = [];
+	            });
+
+	            wsCall({
+	                path: '/v1/connections',
+	                httpMethod: 'POST',
+	                parameters: {
+	                    capabilities: {
+	                        iceFinalCandidates: true
+	                    }
+	                }
+	            }).done(function successHandler(res) {
+	                log.debug('connections result', res);
+	                client.endpointId = res.endpointId;
+	                client.connectionId = res.id;
+	                onSuccess();
+	            }, onError);
+	        };
+	    };
+
+	    /**
+	     * Socket handler for presence messages.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.socketOnPresence
+	     * @param {object} message The Socket.io message.
+	     * @private
+	     */
+	    function socketOnPresence(message) {
+	        var endpoint;
+	        var groups;
+
+	        if (message.header.from === client.endpointId) {
+	            log.debug('socket.on presence for self ignored', message);
+	            // Skip ourselves
+	            return;
+	        }
+	        log.debug('socket.on presence', message);
+
+	        endpoint = client.getEndpoint({
+	            skipPresence: true,
+	            id: message.header.from,
+	            instanceId: instanceId,
+	            // TODO: find out what this is for? should it be message.header.type?
+	            name: message.header.from,
+	            connection: message.header.fromConnection
+	        });
+
+	        endpoint.setPresence({
+	            connectionId: message.header.fromConnection,
+	            presence: message.type
+	        });
+
+	        if (endpoint.presence === 'unavailable') {
+	            groups = client.getGroups();
+	            if (groups) {
+	                groups.forEach(function eachGroup(group) {
+	                    group.removeMember({connectionId: message.header.fromConnection});
+	                });
+	            }
+	        }
+	    }
+	    that.socketOnPresence = socketOnPresence;
+
+	    /**
+	     * On reconnect, start with a reconnect interval of 2000ms. Every time reconnect fails, the interval
+	     * is doubled up to a maximum of 5 minutes. From then on, it will attempt to reconnect every 5 minutes forever.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.reconnect
+	     * @private
+	     */
+	    function reconnect() {
+	        if (clientSettings.reconnect !== true) {
+	            return;
+	        }
+	        // Reconnects within reconnects is ungood
+	        clientSettings.reconnect = false;
+
+	        appToken = null;
+	        token = null;
+
+	        if (that.socket) {
+	            that.socket.removeAllListeners();
+	            that.socket.disconnect();
+	            that.socket = null;
+	        }
+
+	        reconnectTimeout = (reconnectTimeout === null) ? 2500 : 2 * reconnectTimeout;
+
+	        if (reconnectTimeout > (maxReconnectTimeout)) {
+	            reconnectTimeout = maxReconnectTimeout;
+	        }
+
+	        setTimeout(function doReconnect() {
+	            log.debug('Reconnecting...');
+
+	            actuallyConnect().then(function successHandler() {
+	                reconnectTimeout = null;
+	                log.debug('socket reconnected');
+	                return Q.all(client.getGroups().map(function iterGroups(group) {
+	                    client.join({
+	                        id: group.id,
+	                        onMessage: clientSettings.onMessage,
+	                        onJoin: clientSettings.onJoin,
+	                        onLeave: clientSettings.onLeave
+	                    }).catch(function (err) {
+	                        log.error("Couldn't rejoin previous group.", { id: group.id, message: err.message, stack: err.stack });
+	                        throw err;
+	                    });
+	                }));
+	            }).then(function successHandler() {
+	                log.debug('groups rejoined after reconnect');
+	                /**
+	                 * Indicate that a reconnect has succeeded.
+	                 * @event respoke.Client#reconnect
+	                 * @property {string} name - the event name.
+	                 * @property {respoke.Client}
+	                 */
+	                client.fire('reconnect');
+	            }).fin(function finHandler() {
+	                // re-enable reconnects
+	                clientSettings.reconnect = true;
+	            }).done(null, function errHandler(err) {
+	                log.error("Couldn't reconnect. Retrying...", { message: err.message, stack: err.stack });
+	                reconnect();
+	            });
+	        }, reconnectTimeout);
+	    }
+
+	    /**
+	     * Authenticate to the cloud and call the handler on state change.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.authenticate
+	     * @private
+	     * @param {object} params
+	     * @return {Promise}
+	     */
+	    that.authenticate = function authenticate(params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var pieces = [];
+	        var protocol = null;
+	        var host = null;
+	        var port = null;
+
+	        if (!appToken) {
+	            deferred.reject(new Error("Can't open a websocket without an app token."));
+	        }
+
+	        pieces = clientSettings.baseURL.split(/:\/\//);
+	        protocol = pieces[0];
+	        pieces = pieces[1].split(/:/);
+	        host = pieces[0];
+	        port = pieces[1];
+
+	        var connectParams = {
+	            'connect timeout': clientSettings.connectTimeoutMillis,
+	            'force new connection': true, // Don't try to reuse old connection.
+	            'sync disconnect on unload': true, // have Socket.io call disconnect() on the browser unload event.
+	            reconnect: false,
+	            host: host,
+	            port: port || '443',
+	            protocol: protocol,
+	            secure: (protocol === 'https'),
+	            query: '__sails_io_sdk_version=0.10.0&app-token=' + appToken + '&Respoke-SDK=' + sdkHeaderValue
+	        };
+
+	        if (that.isConnected() || isConnecting()) {
+	            return;
+	        }
+
+	        that.socket = respoke.io.connect(clientSettings.baseURL, connectParams);
+
+	        that.socket.on('connect', generateConnectHandler(function onSuccess() {
+	            deferred.resolve();
+	        }, function onError(err) {
+	            deferred.reject(err);
+	        }));
+
+	        that.socket.on('join', socketOnJoin);
+	        that.socket.on('leave', socketOnLeave);
+	        that.socket.on('pubsub', socketOnPubSub);
+	        that.socket.on('message', socketOnMessage);
+	        that.socket.on('presence', socketOnPresence);
+
+	        // connection timeout
+	        that.socket.on('connect_failed', function connectFailedHandler(res) {
+	            deferred.reject(new Error("WebSocket connection failed."));
+	            log.error('Socket.io connect timeout.', res || "");
+	            reconnect();
+	        });
+
+	        // handshake error, 403, socket disconnects on FireFox
+	        that.socket.on('error', function errorHandler(res) {
+	            log.error('Socket.io error.', res || "");
+	            reconnect();
+	        });
+
+	        that.addHandler({
+	            type: 'signal',
+	            handler: function signalHandler(message) {
+	                var knownSignals = ['offer', 'answer', 'connected', 'modify', 'iceCandidates', 'bye'];
+	                var signal = respoke.SignalingMessage({
+	                    rawMessage: message
+	                });
+
+	                if (signal.signalType === 'ack') {
+	                    return;
+	                }
+
+	                if (!signal.target || !signal.signalType || knownSignals.indexOf(signal.signalType) === -1) {
+	                    log.error("Got malformed signal.", signal);
+	                    throw new Error("Can't route signal without target or type.");
+	                }
+
+	                that.routeSignal(signal);
+	            }
+	        });
+
+	        that.socket.on('disconnect', function onDisconnect() {
+	            log.debug('Socket.io disconnect.');
+	            pendingRequests.reset(function (pendingRequest) {
+	                log.debug('Failing pending requests');
+	                pendingRequest.reject(new Error("WebSocket disconnected"));
+	            });
+
+	            /**
+	             * Indicate that this client has been disconnected from the Respoke service.
+	             * @event respoke.Client#disconnect
+	             * @property {string} name - the event name.
+	             * @property {respoke.Client} target
+	             */
+	            client.fire('disconnect');
+
+	            reconnect();
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Get ephemeral TURN credentials.  This method is called whenever a call is either
+	     * sent or received, prior to creating a PeerConnection
+	     *
+	     * @memberof! respoke.SignalingChannel
+	     * @private
+	     * @method respoke.SignalingChannel.getTurnCredentials
+	     * @return {Promise<Array>}
+	     */
+	    that.getTurnCredentials = function getTurnCredentials() {
+	        var deferred = Q.defer();
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        wsCall({
+	            httpMethod: 'GET',
+	            path: '/v1/turn'
+	        }).done(function successHandler(creds) {
+	            var result = [];
+
+	            if (!creds || !creds.uris) {
+	                deferred.reject(new Error("Turn credentials empty."));
+	                return;
+	            }
+
+	            creds.uris.forEach(function saveTurnUri(uri) {
+	                var cred = null;
+
+	                if (!uri) {
+	                    return;
+	                }
+
+	                cred = createIceServer(uri, creds.username, creds.password);
+	                result.push(cred);
+	            });
+
+	            if (result.length === 0) {
+	                deferred.reject(new Error("Got no TURN credentials."));
+	            }
+
+	            log.debug('TURN creds', result);
+	            deferred.resolve(result);
+	        }, function errorHandler(err) {
+	            deferred.reject(err);
+	        });
+
+	        return deferred.promise;
+	    };
+
+	    /**
+	     * Construct a websocket API call and return the formatted response and errors. The 'success'
+	     * attribute indicates the success or failure of the API call. The 'response' attribute
+	     * is an associative array constructed by json.decode. The 'error' attriute is a message.
+	     * If the API call is successful but the server returns invalid JSON, error will be
+	     * "Invalid JSON." and response will be the unchanged content of the response body.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.wsCall
+	     * @private
+	     * @param {object} params
+	     * @param {string} params.httpMethod
+	     * @param {string} params.path
+	     * @param {string} params.objectId
+	     * @param {object} params.parameters - These are request body parameters that get converted to JSON before
+	     * being sent over the websocket. Undefined parameters and functions are removed by JSON.stringify.
+	     * @return {Promise<object>}
+	     */
+	    function wsCall(params) {
+	        params = params || {};
+	        var deferred = Q.defer();
+	        var start = now();
+	        // Too many of these!
+	        var logRequest = (params.path.indexOf('messages') === -1 && params.path.indexOf('signaling') === -1) ||
+	            respoke.ridiculous;
+	        var request;
+	        var bodyLength = 0;
+	        if (params.parameters) {
+	            bodyLength = encodeURI(JSON.stringify(params.parameters)).split(/%..|./).length - 1;
+	        }
+
+	        if (!that.isConnected()) {
+	            deferred.reject(new Error("Can't complete request when not connected. Please reconnect!"));
+	            return deferred.promise;
+	        }
+
+	        if (!params) {
+	            deferred.reject(new Error('No params.'));
+	            return deferred.promise;
+	        }
+
+	        if (!params.path) {
+	            deferred.reject(new Error('No request path.'));
+	            return deferred.promise;
+	        }
+
+	        if (bodyLength > bodySizeLimit) {
+	            deferred.reject(new Error('Request body exceeds maximum size of ' + bodySizeLimit + ' bytes'));
+	            return deferred.promise;
+	        }
+
+	        params.httpMethod = (params.httpMethod || 'get').toLowerCase();
+
+	        if (params.urlParams) {
+	            params.path = template.parse(params.path).expand(params.urlParams);
+	        }
+
+	        if (logRequest) {
+	            log.debug('socket request', {
+	                method: params.httpMethod,
+	                path: params.path,
+	                parameters: params.parameters
+	            });
+	        }
+
+	        request = {
+	            method: params.httpMethod,
+	            path: params.path,
+	            parameters: params.parameters,
+	            tries: 0,
+	            durationMillis: 0
+	        };
+
+	        request.id = pendingRequests.add(deferred);
+
+	        function handleResponse(response) {
+	            var thisHandler = this; // jshint ignore:line
+	            /*
+	             * Response:
+	             *  {
+	             *      body: {},
+	             *      headers: {},
+	             *      statusCode: 200
+	             *  }
+	             */
+	            try {
+	                response.body = JSON.parse(response.body);
+	            } catch (e) {
+	                if (typeof response.body !== 'object') {
+	                    deferred.reject(new Error("Server response could not be parsed!" + response.body));
+	                    return;
+	                }
+	            }
+
+	            if (response.statusCode === 429) {
+	                if (request.tries < 3 && deferred.promise.isPending()) {
+	                    setTimeout(function () {
+	                        start = now();
+	                        sendWebsocketRequest(request, handleResponse);
+	                    }, 1000); // one day this will be response.interval or something
+	                } else {
+	                    request.durationMillis = now() - start;
+	                    pendingRequests.remove(request.id);
+	                    failWebsocketRequest(request, response,
+	                            "Too many retries after rate limit exceeded.", deferred);
+	                }
+	                return;
+	            }
+
+	            request.durationMillis = now() - start;
+	            pendingRequests.remove(request.id);
+
+	            if (logRequest) {
+	                log.debug('socket response', {
+	                    method: request.method,
+	                    path: request.path,
+	                    durationMillis: request.durationMillis,
+	                    response: response
+	                });
+	            }
+
+	            if (isBillingSuspensionUnauthorizedResponse(response)) {
+	                failWebsocketRequest(request, response, billingSuspensionErrorMessage, deferred);
+	                return;
+	            }
+
+	            if (isSuspensionUnauthorizedResponse(response)) {
+	                failWebsocketRequest(request, response, suspensionErrorMessage, deferred);
+	                return;
+	            }
+
+	            if ([200, 204, 205, 302, 401, 403, 404, 418].indexOf(thisHandler.status) === -1) {
+	                failWebsocketRequest(request, response,
+	                        response.body.error || errors[thisHandler.status] || "Unknown error", deferred);
+	                return;
+	            }
+
+	            deferred.resolve(response.body);
+	        }
+
+	        start = now();
+	        sendWebsocketRequest(request, handleResponse);
+	        return deferred.promise;
+	    }
+	    that.wsCall = wsCall;
+
+	    function failWebsocketRequest(request, response, error, deferred) {
+	        if (response && response.body && response.body.error) {
+	            deferred.reject(buildResponseError(response, error + ' (' + request.method + ' ' + request.path + ')'));
+	        } else {
+	            deferred.resolve(response.body);
+	        }
+	    }
+
+	    function sendWebsocketRequest(request, handleResponse) {
+	        request.tries += 1;
+	        that.socket.emit(request.method, JSON.stringify({
+	            url: request.path,
+	            data: request.parameters,
+	            headers: {
+	                'App-Token': appToken,
+	                'Respoke-SDK': sdkHeaderValue }
+	        }), handleResponse);
+	    }
+
+	    /**
+	     * Construct an API call and return the formatted response and errors. The 'success'
+	     * attribute indicates the success or failure of the API call. The 'response' attribute
+	     * is an associative array constructed by json.decode. The 'error' attribute is a message.
+	     * If the API call is successful but the server returns invalid JSON, error will be
+	     * "Invalid JSON." and response will be the unchanged content of the response body.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.call
+	     * @private
+	     * @param {object} params
+	     * @param {string} params.httpMethod
+	     * @param {string} params.objectId
+	     * @param {string} params.path
+	     * @param {object} params.parameters
+	     * @returns {Promise}
+	     */
+	    function call(params) {
+	        /* Params go in the URI for GET, DELETE, same format for
+	         * POST and PUT, but they must be sent separately after the
+	         * request is opened. */
+	        var deferred = Q.defer();
+	        var paramString = null;
+	        var uri = null;
+	        var response = {
+	            body: null,
+	            statusCode: null
+	        };
+	        var start = now();
+
+	        uri = clientSettings.baseURL + params.path;
+
+	        if (!params) {
+	            deferred.reject(new Error('No params.'));
+	            return;
+	        }
+
+	        if (!params.httpMethod) {
+	            deferred.reject(new Error('No HTTP method.'));
+	            return;
+	        }
+
+	        if (!params.path) {
+	            deferred.reject(new Error('No request path.'));
+	            return;
+	        }
+
+	        if (params.urlParams) {
+	            uri = template.parse(uri).expand(params.urlParams);
+	        }
+
+	        if (['GET', 'DELETE'].indexOf(params.httpMethod) > -1) {
+	            uri += makeParamString(params.parameters);
+	        }
+
+	        xhr.open(params.httpMethod, uri);
+	        xhr.setRequestHeader('Respoke-SDK', sdkHeaderValue);
+	        if (appToken) {
+	            xhr.setRequestHeader("App-Token", appToken);
+	        }
+	        if (['POST', 'PUT'].indexOf(params.httpMethod) > -1) {
+	            paramString = JSON.stringify(params.parameters);
+	            if (paramString.length > bodySizeLimit) {
+	                deferred.reject(new Error('Request body exceeds maximum size of ' + bodySizeLimit + ' bytes'));
+	                return;
+	            }
+	            xhr.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
+	        } else if (['GET', 'DELETE'].indexOf(params.httpMethod) === -1) {
+	            deferred.reject(new Error('Illegal HTTP request method ' + params.httpMethod));
+	            return;
+	        }
+	        log.debug('request', {
+	            method: params.httpMethod,
+	            uri: uri,
+	            params: paramString
+	        });
+
+	        try {
+	            xhr.send(paramString);
+	        } catch (err) {
+	            deferred.reject(err);
+	            return;
+	        }
+
+	        xhr.onreadystatechange = function () {
+	            var durationMillis = now() - start;
+	            var limit;
+	            var unit;
+
+	            if (this.readyState !== 4) {
+	                return;
+	            }
+
+	            if (this.status === 0) {
+	                deferred.reject(new Error("Status is 0: Incomplete request, SSL error, or CORS error."));
+	                return;
+	            }
+
+	            response.statusCode = this.status;
+	            response.headers = getAllResponseHeaders(this);
+	            response.uri = uri;
+	            response.params = params.parameters;
+	            response.error = errors[this.status];
+
+	            if (this.response) {
+	                try {
+	                    response.body = JSON.parse(this.response);
+	                } catch (e) {
+	                    response.body = this.response;
+	                    response.error = "Invalid JSON.";
+	                }
+	            }
+
+	            log.debug('response', {
+	                method: params.httpMethod,
+	                durationMillis: durationMillis,
+	                response: response
+	            });
+
+	            if ([200, 204, 205, 302, 401, 403, 404, 418].indexOf(this.status) > -1) {
+	                deferred.resolve(response);
+	            } else if (this.status === 429) {
+	                unit = getResponseHeader(this, 'RateLimit-Time-Units');
+	                limit = getResponseHeader(this, 'RateLimit-Limit');
+	                deferred.reject(buildResponseError(response, "Rate limit of " + limit + "/" + unit +
+	                    " exceeded. Try again in 1 " + unit + "."));
+	            } else {
+	                deferred.reject(buildResponseError(response, 'unexpected response code ' + this.status));
+	            }
+	        };
+
+	        return deferred.promise;
+	    }
+
+	    function isSuspensionUnauthorizedResponse(response) {
+	        return (response.statusCode === 401) && response.body && response.body.details &&
+	            (typeof response.body.details.message === 'string') &&
+	            (response.body.details.message.indexOf('suspended') > -1);
+	    }
+
+	    function isBillingSuspensionUnauthorizedResponse(response) {
+	        return isSuspensionUnauthorizedResponse(response) &&
+	            (typeof response.body.details.reason === 'string') &&
+	            (response.body.details.reason.indexOf('billing suspension') > -1);
+	    }
+
+	    /**
+	     * Turn key/value and key/list pairs into an HTTP URL parameter string.
+	     * var1=value1&var2=value2,value3,value4
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.makeParamString
+	     * @private
+	     * @param {object} params - Arbitrary collection of strings and arrays to serialize.
+	     * @returns {string}
+	     */
+	    function makeParamString(params) {
+	        var strings = [];
+	        if (!params) {
+	            return '';
+	        }
+
+	        Object.keys(params).forEach(function formatParam(name) {
+	            var value = params[name];
+	            /* Skip objects -- We won't know how to name these. */
+	            if (value instanceof Array) {
+	                strings.push([name, value.join(',')].join('='));
+	            } else if (typeof value !== 'object' && typeof value !== 'function') {
+	                strings.push([name, value].join('='));
+	            }
+	        });
+
+	        if (strings.length > 0) {
+	            return '?' + strings.join('&');
+	        } else {
+	            return '';
+	        }
+	    }
+
+	    /**
+	     * Tries to retrieve a single header value from an XHR response. If the header is disallowed,
+	     * or does not exist, will return null. Otherwise returns the value of the header.
+	     *
+	     * The CORS spec does not define what the browser should do in the case of a request for a
+	     * disallowed header, but at least Chrome throws an exception.
+	     *
+	     * @param {object} xhrResponse The response of an XMLHttpRequest
+	     * @param {string} header The name of the header to retrieve the value for
+	     * @returns {string|null} The value(s) of the header, or null if disallowed or unavailable.
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.getResponseHeader
+	     * @private
+	     */
+	    function getResponseHeader(xhrResponse, header) {
+	        try {
+	            return xhrResponse.getResponseHeader(header);
+	        } catch (e) {
+	            return null;
+	        }
+	    }
+
+	    /**
+	     * Retrieves all headers from an XHR response as key/val pairs
+	     *
+	     * @param {object} xhrResponse The response of an XMLHttpRequest
+	     * @returns {*} the key/val pairs of the response headers
+	     * @memberof! respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.getAllResponseHeaders
+	     * @private
+	     */
+	    function getAllResponseHeaders(xhrResponse) {
+	        var result = {};
+	        var headers;
+	        var pairs;
+
+	        headers = xhrResponse.getAllResponseHeaders();
+	        if (!headers) {
+	            return result;
+	        }
+
+	        // 1 header per line (cr+lf)
+	        pairs = headers.split('\u000d\u000a');
+	        pairs.forEach(function (pair) {
+	            var key;
+	            var val;
+
+	            // key separated from value by ': '
+	            // value may contain ': ', so using indexOf instead of split
+	            var index = pair.indexOf('\u003a\u0020');
+	            if (index > 0) {
+	                key = pair.substring(0, index);
+	                val = pair.substring(index + 2);
+	                result[key] = val;
+	            }
+	        });
+
+	        return result;
+	    }
+
+	    /**
+	     * Creates an Error with the supplied `message` and, if available, the `Request-Id` header
+	     * from the supplied `response`.
+	     *
+	     * @param {object} res
+	     * @param {object} [res.headers]
+	     * @param {string} [res.headers.Request-Id] The requestId to append to the Error message
+	     * @param {string} message The message the Error should be constructed with
+	     * @returns {Error} the constructed Error object
+	     * @memberof respoke.SignalingChannel
+	     * @method respoke.SignalingChannel.buildResponseError
+	     * @api private
+	     */
+	    function buildResponseError(res, message) {
+	        var requestId = res && res.headers && res.headers['Request-Id'];
+	        if (requestId) {
+	            message += ' [Request-Id: ' + requestId + ']';
+	        }
+
+	        return new Error(message);
+	    }
+
+	    return that;
+	}; // End respoke.SignalingChannel
+	/**
+	 * Handle an error that resulted from a method call.
+	 * @callback respoke.SignalingChannel.errorHandler
+	 * @params {Error} err
+	 */
+	/**
+	 * Handle sending successfully.
+	 * @callback respoke.SignalingChannel.sendHandler
+	 */
+	/**
+	 * Receive a group.
+	 * @callback respoke.SignalingChannel.groupHandler
+	 * @param {respoke.Group}
+	 */
+	/**
+	 * Receive a list of groups.
+	 * @callback respoke.SignalingChannel.groupListHandler
+	 * @param {Array}
+	 */
+	/**
+	 * Receive a list of TURN credentials.
+	 * @callback respoke.SignalingChannel.turnSuccessHandler
+	 * @param {Array}
+	 */
 
 
 /***/ },
@@ -14368,7 +14389,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * For all details and documentation:  https://www.respoke.io
 	 */
 
-	var Q = __webpack_require__(6);
+	var Q = __webpack_require__(8);
 	var respoke = __webpack_require__(1);
 	var log = respoke.log;
 
@@ -14956,7 +14977,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * For all details and documentation:  https://www.respoke.io
 	 */
 
-	var Q = __webpack_require__(6);
+	var Q = __webpack_require__(8);
 	var respoke = __webpack_require__(1);
 	var log = respoke.log;
 	var Statechart = __webpack_require__(19);
@@ -15273,6 +15294,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     *       don't support trickle ice.
 	     */
 	    var localCandidates = [];
+
 	    /**
 	     * @memberof! respoke.PeerConnection
 	     * @name localCandidatesComplete
@@ -15281,6 +15303,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @desc Whether all the local candidates have been received.
 	     */
 	    var localCandidatesComplete = false;
+
 	    /**
 	     * @memberof! respoke.PeerConnection
 	     * @name localCandidatesSent
@@ -15289,6 +15312,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @desc The number of local candidates that have been sent to the remote.
 	     */
 	    var localCandidatesSent = 0;
+
 	    /**
 	     * @memberof! respoke.PeerConnection
 	     * @name localCandidatesSent
@@ -15297,6 +15321,16 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @desc FSM for managing local ICE candidates.
 	     */
 	    var localCandidatesFSM;
+
+	    /**
+	     * @memberof! respoke.PeerConnection
+	     * @name localCandidatesTimeout
+	     * @private
+	     * @type {number}
+	     * @desc timeoutId for the ice gathering timeout. Fires when no ice candidate
+	     *  received in a specified period of time, to speed up finalCandidates signal.
+	     */
+	    var localCandidatesTimeout;
 
 	    /**
 	     * The number of local candidates that have not yet been sent.
@@ -15323,17 +15357,23 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * Send the remaining local candidates that have not yet been sent.
 	     * @private
 	     */
-	    function sendRemainingCandidates() {
+	    function sendRemainingCandidates(params) {
 	        var remainingCandidates = localCandidates.slice(localCandidatesSent);
-	        var params = {iceCandidates: remainingCandidates};
+	        var signalParams = {iceCandidates: remainingCandidates};
 
 	        localCandidatesSent += remainingCandidates.length;
 
-	        if (localCandidatesComplete) {
-	            params.finalCandidates = localCandidates;
+	        if (localCandidatesComplete && !(params && params.suppressFinalCandidates)) {
+	            signalParams.finalCandidates = localCandidates;
 	        }
 
-	        signalCandidates(params)
+	        if (!signalParams.iceCandidates.length && !signalParams.finalCandidates) {
+	            // Nothing to send. Happens if we receive the null "end of ice" ice candidate
+	            // after we've already sent the finalCandidates signal.
+	            return;
+	        }
+
+	        signalCandidates(signalParams)
 	            .finally(function () {
 	                localCandidatesFSM.dispatch('iceSent');
 	            }).done();
@@ -15354,7 +15394,12 @@ return /******/ (function(modules) { // webpackBootstrap
 	                localIceCandidate: {action: collectLocalIceCandidate},
 	                iceSent: [{
 	                    guard: function () {
-	                        return localCandidatesRemaining() === 0;
+	                        return localCandidatesRemaining() === 0 && localCandidatesComplete;
+	                    },
+	                    target: 'finished'
+	                }, {
+	                    guard: function () {
+	                        return localCandidatesRemaining() === 0 && !localCandidatesComplete;
 	                    },
 	                    target: 'waiting'
 	                }, {
@@ -15365,12 +15410,35 @@ return /******/ (function(modules) { // webpackBootstrap
 	                }]
 	            },
 	            waiting: {
+	                entry: {
+	                    action: function () {
+	                        localCandidatesTimeout = setTimeout(function () {
+	                            log.debug('ice gathering has timed out. sending final candidate signal.');
+	                            localCandidatesComplete = true;
+	                            localCandidatesFSM.dispatch('localIceCandidate');
+	                        }, 2000);
+	                    }
+	                },
+	                exit: {
+	                    action: function () {
+	                        clearTimeout(localCandidatesTimeout);
+	                    }
+	                },
 	                localIceCandidate: {
 	                    action: function (params) {
 	                        collectLocalIceCandidate(params);
 	                        sendRemainingCandidates();
 	                    },
 	                    target: 'sending'
+	                }
+	            },
+	            finished: {
+	                localIceCandidate: {
+	                    // helps trickleIce-compatible clients
+	                    action: function (params) {
+	                        collectLocalIceCandidate(params);
+	                        sendRemainingCandidates({ suppressFinalCandidates: true });
+	                    }
 	                }
 	            }
 	        }
@@ -16785,7 +16853,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	var respoke = __webpack_require__(1);
 	var log = respoke.log;
 	var Statechart = __webpack_require__(19);
-	var Q = __webpack_require__(6);
+	var Q = __webpack_require__(8);
 
 	/**
 	 * State machine for WebRTC calling, data channels, and screen sharing.
@@ -17452,7 +17520,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * For all details and documentation:  https://www.respoke.io
 	 */
 
-	var Q = __webpack_require__(6);
+	var Q = __webpack_require__(8);
 	var respoke = __webpack_require__(1);
 	var log = respoke.log;
 
@@ -20535,7 +20603,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * For all details and documentation:  https://www.respoke.io
 	 */
 
-	var Q = __webpack_require__(6);
+	var Q = __webpack_require__(8);
 	var respoke = __webpack_require__(1);
 
 	/**
