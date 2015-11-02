@@ -192,7 +192,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	var EventEmitter = __webpack_require__(4);
 	var respoke = module.exports = EventEmitter({
 	    ridiculous: false, // print every websocket tx/rx
-	    buildNumber: 'v1.54.0',
+	    buildNumber: 'v1.54.1',
 	    streams: [],
 	    io: __webpack_require__(6),
 	    Q: __webpack_require__(8)
@@ -15941,31 +15941,30 @@ return /******/ (function(modules) { // webpackBootstrap
 	    }
 
 	    /**
-	     * Send what are known in telecom world as DTMF tones to the other party. This allows the user to interact with
-	     * IVRs when connected to a PSTN phone call for example.
+	     * Send DTMF tones to the first audio track on the call. This allows interaction with a phone system expecting keys
+	     * to be pressed on a normal phone, such as when calling a company for customer support and having to "Press 1 for English".
 	     * @memberof! respoke.PeerConnection
 	     * @method respoke.PeerConnection.sendTones
-	     * @param {object} param
-	     * @param {string} [param.tones] - This string can be made up of the characters `0 through to 9`, `A through
-	     to D`, a `#` or a `*` and are case insensitive. These characters form tones of different frequencies.
-	     You can also include the character `,` to insert a delay of 2 seconds before sending the next tone.
-	     * @param {number} [param.duration] - Optional number in milliseconds to indicate how long to play the individual
-	     tone for. This value needs to be between 40 and 6000 and defaults to 100.
-	     * @param {number} [param.gap] - Optional number in mlliseconds to indicate the gap between playing the tones.
-	     This value needs to be larger than 30 and defaults to 70.
-	     * @param {function} [params.onSuccess] - Success handler for this invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
+	     * @param {object} params
+	     * @param {string} params.tones - The tones to send. Can be any combination of the characters '0123456789ABCD#*', or
+	     *  a ',' (comma) to insert a 2 second pause before sending the next tone.
+	     * @param {number} [params.duration] - Optional number in milliseconds to indicate how long to play each tone. This
+	     *  value needs to be between 40 and 6000. Defaults to 100.
+	     * @param {number} [params.gap] - Optional number in mlliseconds to indicate the gap between playing the tones.
+	     *  This value needs to be larger than 30. Defaults to 70.
+	     * @param {respoke.Call.onSuccess} [params.onSuccess] - Callback called when all requested DTMF tones have been played.
+	     * @param {respoke.Call.onError} [params.onError] - Callback called when an error occurs while playing back the DTMF
+	     *  tones, or when the request has been cancelled.
 	     * @fires respoke.PeerConnection#tone-sent
 	     * @fires respoke.PeerConnection#tone-sending-complete
+	     * @returns {Promise|null} Returns a promise if no onSuccess nor onError callbacks are specified. Otherwise, returns null.
 	     */
-
 	    that.sendTones = function (params) {
 	        var deferred = Q.defer();
 
 	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
 
-	        params = typeof params === 'object' ? params  : {};
+	        params = typeof params === 'object' ? params : {};
 
 	        params.duration = params.duration || 100;
 	        params.gap = params.gap || 50;//chrome says minimum is 50 not 30 like the spec
@@ -16010,7 +16009,7 @@ return /******/ (function(modules) { // webpackBootstrap
 
 	        var audioTracks = that.call.outgoingMedia.getAudioTracks();
 	        if (!audioTracks || audioTracks.length < 1) {
-	            err = new Error('Could not send tones "' + params.tones + '" because not audio sent yet');
+	            err = new Error('Could not send tones "' + params.tones + '". No audio track available.');
 	            log.warn(err);
 	            deferred.reject(err);
 	            return retVal;
@@ -16019,47 +16018,44 @@ return /******/ (function(modules) { // webpackBootstrap
 	        digitSender = pc.createDTMFSender(audioTracks[0]);
 
 	        digitSender.ontonechange = function onToneChange(evt) {
-	            /**
-	             * Indicate the RTCPeerConnection has sent a tone.
-	             * @event respoke.PeerConnection#tone-sent
-	             * @type {respoke.Event}
-	             * @property {string} evt.tone
-	             * @property {number} evt.duration
-	             * @property {number} evt.gap
-	             */
-
-	            var eventData = {
-	                tone: evt.tone,
-	                duration: digitSender.duration,
-	                gap: digitSender.interToneGap
-	            };
-
 	            if (evt.tone !== '') {
-	                that.call.fire('tone-sent', eventData);
+	                /**
+	                 * Indicate the RTCPeerConnection has sent a tone.
+	                 * @event respoke.PeerConnection#tone-sent
+	                 * @type {respoke.Event}
+	                 * @property {string} evt.tone
+	                 * @property {number} evt.duration
+	                 * @property {number} evt.gap
+	                 */
+	                that.call.fire('tone-sent', {
+	                    tone: evt.tone,
+	                    duration: digitSender.duration,
+	                    gap: digitSender.interToneGap
+	                });
+	                return;
 	            }
 
-	            //empty string in evt.tone represents end of the queue so do tidy up here for sendTones & cancelTones
-	            if (evt.tone === '') {
+	            /*
+	             * The tone string is empty, which is how the DTMFSender represents the end
+	             * of the tone queue. Cleanup our handlers, wrap up the promises, and fire
+	             * the appropriate events.
+	             */
+	            digitSender = null;
 
-	                digitSender = null;
-
-	                if (!cancellingTones) {
-
-	                    /**
-	                     * Indicate the RTCPeerConnection has finished sending tones, unless they were cancelled.
-	                     * @event respoke.PeerConnection#tone-sending-complete
-	                     * @type {respoke.Event}
-	                     * @property {string} name - the event name.
-	                     */
-	                    deferred.resolve();
-	                    that.call.fire('tone-sending-complete');
-	                } else {
-	                    cancellingTones = false;
-	                    deferred.reject(new Error('Tone playback cancelled'));
-	                }
-
+	            if (cancellingTones) {
+	                cancellingTones = false;
+	                deferred.reject(new Error('Tone playback cancelled'));
+	                return;
 	            }
 
+	            /**
+	             * Indicate the RTCPeerConnection has finished sending tones, unless they were cancelled.
+	             * @event respoke.PeerConnection#tone-sending-complete
+	             * @type {respoke.Event}
+	             * @property {string} name - the event name.
+	             */
+	            deferred.resolve();
+	            that.call.fire('tone-sending-complete');
 	        };
 
 	        if (!digitSender.canInsertDTMF) {
@@ -16087,21 +16083,17 @@ return /******/ (function(modules) { // webpackBootstrap
 	    };
 
 	    /**
-	     * Cancel any tones still being sent via sendTones.
+	     * Cancel any tones currently being sent via sendTones.
 	     * @memberof! respoke.PeerConnection
 	     * @method respoke.PeerConnection.cancelTones
-	     * @param {object} param
+	     * @param {object} params
 	     * @param {function} [params.onSuccess] - Success handler for this invocation of this method only.
-	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this
-	     * method only.
-	     * @fires respoke.PeerConnection
+	     * @param {respoke.Client.errorHandler} [params.onError] - Error handler for this invocation of this method only.
 	     * @fires respoke.PeerConnection#tone-sending-cancelled
+	     * @returns {Promise|null} Returns a promise if no onSuccess nor onError callbacks are specified. Otherwise, returns null.
 	     */
-
 	    that.cancelTones = function (params) {
-
 	        var deferred = Q.defer();
-
 	        var retVal = respoke.handlePromise(deferred.promise, params.onSuccess, params.onError);
 	        var err;
 
@@ -16110,7 +16102,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	            log.warn(err);
 	            deferred.reject(err);
 	            return retVal;
-
 	        }
 
 	        if (!digitSender) {
@@ -16158,11 +16149,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * signal is not false and we have not received a hangup signal from the remote party.
 	     * @memberof! respoke.PeerConnection
 	     * @method respoke.PeerConnection.close
-	     * @fires respoke.PeerConnection#destoy
-	     * @param {object} param
-	     * @param {boolean} [param.signal] - Optional flag to indicate whether to send or suppress sending
-	     * a hangup signal to the remote side. This is set to false by the library if we're responding to a
-	     * hangup signal.
+	     * @param {object} params
+	     * @param {boolean} [params.signal] - Optional flag to indicate whether to send or suppress sending
+	     *  a hangup signal to the remote side. This is set to false by the library if we're responding to a
+	     *  hangup signal.
 	     * @fires respoke.PeerConnection#close
 	     */
 	    that.close = function (params) {
@@ -19195,18 +19185,23 @@ return /******/ (function(modules) { // webpackBootstrap
 	    };
 
 	    /**
-	     * Send tones to the first audio track in a stream
+	     * Send DTMF tones to the first audio track on the call. This allows interaction with a phone system expecting keys
+	     * to be pressed on a normal phone, such as when calling a company for customer support and having to "Press 1 for English".
 	     * @memberof! respoke.Call
 	     * @method respoke.Call.sendTones
+	     * @param {object} params
+	     * @param {string} params.tones - The tones to send. Can be any combination of the characters '0123456789ABCD#*', or
+	     *  a ',' (comma) to insert a 2 second pause before sending the next tone.
+	     * @param {number} [params.duration] - Optional number in milliseconds to indicate how long to play each tone. This
+	     *  value needs to be between 40 and 6000. Defaults to 100.
+	     * @param {number} [params.gap] - Optional number in mlliseconds to indicate the gap between playing the tones.
+	     *  This value needs to be larger than 30. Defaults to 70.
+	     * @param {respoke.Call.onSuccess} [params.onSuccess] - Callback called when all requested DTMF tones have been played.
+	     * @param {respoke.Call.onError} [params.onError] - Callback called when an error occurs while playing back the DTMF
+	     *  tones, or when the request has been cancelled.
 	     * @fires respoke.Call#tone-sent
 	     * @fires respoke.Call#tone-sending-complete
-	     * @fires respoke.Call#tone-sending-error
-	     * @fires respoke.Call#tone-sending-started
-	     * @param {respoke.Call.onSuccess} [params.onSuccess] - Callback for when a request to
-	     * play tones has succeeded.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for when a request to
-	     * play tones has failed.
-	     * @returns {Promise<respoke.PeerConnection>}
+	     * @returns {Promise}
 	     */
 	    that.sendTones = function (params) {
 	        return pc.sendTones(params);
@@ -19216,13 +19211,12 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * Cancels playback of all queued tones on the first audio track in a stream
 	     * @memberof! respoke.Call
 	     * @method respoke.Call.cancelTones
+	     * @param {respoke.Call.onSuccess} [params.onSuccess] - Callback called when all the outstanding DTMF tones that
+	     *  have not yet been played have been cancelled.
+	     * @param {respoke.Call.onError} [params.onError] - Callback called when an error occurs while attempting to cancel
+	     *  outstanding DTMF tones.
 	     * @fires respoke.Call#tone-sending-cancelled
-	     * @fires respoke.Call#tone-sending-error
-	     * @param {respoke.Call.onSuccess} [params.onSuccess] - Callback for when a request to
-	     * play tones has succeeded.
-	     * @param {respoke.Call.onError} [params.onError] - Callback for when a request to
-	     * play tones has failed.
-	     * @returns {Promise<respoke.PeerConnection>}
+	     * @returns {Promise}
 	     */
 	    that.cancelTones = function (params) {
 	        return pc.cancelTones(params);
