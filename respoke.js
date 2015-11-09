@@ -192,7 +192,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	var EventEmitter = __webpack_require__(4);
 	var respoke = module.exports = EventEmitter({
 	    ridiculous: false, // print every websocket tx/rx
-	    buildNumber: 'v1.54.1',
+	    buildNumber: 'v1.55.0',
 	    streams: [],
 	    io: __webpack_require__(6),
 	    Q: __webpack_require__(8)
@@ -432,7 +432,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	 *
 	 * @static
 	 * @memberof respoke
-	 * @param {number} id The Client ID.
+	 * @param {string} id The Client ID.
 	 * @returns {respoke.Client}
 	 */
 	respoke.getClient = function (id) {
@@ -456,7 +456,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	 *
 	 * @static
 	 * @memberof respoke
-	 * @param {object} params Parameters to respoke.Client - same as respoke.connect()
+	 * @param {object} [params] Parameters to respoke.Client - same as respoke.connect()
 	 * @returns {respoke.Client}
 	 */
 	respoke.createClient = function (params) {
@@ -8279,6 +8279,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @arg {boolean} [params.create] - whether or not to create a new call if the specified endpointId isn't found
 	     * @arg {string} [params.fromType] - fromType from the signal, tells us if this is a SIP or DID call.
 	     * @arg {string} [params.target] - target from the signal, tells us if this is a screenshare or conference call.
+	     * @arg {*} [params.metadata] - Metadata to be attached to the call if created, accessible by the callee.
 	     * @returns {respoke.Call}
 	     */
 	    that.getCall = function (params) {
@@ -8316,6 +8317,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	        callParams.fromType = "web";
 	        callParams.callerId = params.callerId;
 	        callParams.target = params.target;
+	        callParams.metadata = params.metadata;
 
 	        if (params.target === "conference") {
 	            callParams.id = params.conferenceId;
@@ -8354,7 +8356,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @method respoke.Client.addCall
 	     * @param {object} evt
 	     * @param {respoke.Call} evt.call
-	     * @param {respoke.Endpoint} evt.endpoint
 	     * @private
 	     */
 	    function addCall(evt) {
@@ -8367,7 +8368,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	        }
 
 	        evt.call.listen('hangup', function () {
-	            removeCall({call: evt.call});
+	            removeCall({ call: evt.call });
 	        });
 	    }
 
@@ -8376,7 +8377,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @memberof! respoke.Client
 	     * @method respoke.Client.removeCall
 	     * @param {object} evt
-	     * @param {respoke.Call} evt.target
+	     * @param {respoke.Call} evt.call
 	     * @private
 	     */
 	    function removeCall(evt) {
@@ -8552,16 +8553,17 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * relay servers. If it cannot flow through relay servers, the call will fail.
 	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
 	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {*} [params.metadata] - Metadata to be attached to the conference call, accessible by the callee.
 	     * @returns {respoke.Conference}
 	     */
 	    that.joinConference = function (params) {
-	        var conference = null;
+	        var conference;
 	        var recipient;
+
+	        that.verifyConnected();
 
 	        params = params || {};
 	        params.open = !!params.open;
-
-	        that.verifyConnected();
 
 	        if (!params.id) {
 	            params.id = respoke.makeGUID();
@@ -8597,6 +8599,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	            signalParams.open = params.open;
 	            signalParams.recipient = recipient;
 	            signalParams.toType = "conference";
+	            signalParams.metadata = params.metadata;
 
 	            that.signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
 	        };
@@ -8653,7 +8656,7 @@ return /******/ (function(modules) { // webpackBootstrap
 
 	        params.signalingChannel = that.signalingChannel;
 	        conference = respoke.Conference(params);
-	        addCall({call: conference.call});
+	        addCall({ call: conference.call });
 	        return conference;
 	    };
 
@@ -8706,6 +8709,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * all connections belonging to this endpoint.
 	     * @param {string} [params.source] - Pass in what type of mediaSource you want. If omitted, you'll have access
 	     * to both the screen and windows. In firefox, you'll have access to the screen only.
+	     * @param {*} [params.metadata] - Metadata to be attached to the screenShare, accessible by the callee.
 	     * @returns {respoke.Call}
 	     */
 	    that.startScreenShare = function (params) {
@@ -8768,6 +8772,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * local video attached to it.
 	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have
 	     * remote video attached to it.
+	     * @param {*} [params.metadata] - Metadata to be attached to the call, accessible by the callee.
 	     * @return {respoke.Call}
 	     */
 	    that.startCall = function (params) {
@@ -8830,6 +8835,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * video attached to it.
 	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
 	     * video attached to it.
+	     * @param {*} [params.metadata] - Metadata to be attached to the audio call, accessible by the callee.
 	     * @return {respoke.Call}
 	     */
 	    that.startAudioCall = function (params) {
@@ -8892,6 +8898,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * video attached to it.
 	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
 	     * video attached to it.
+	     * @param {*} [params.metadata] - Metadata to be attached to the video call, accessible by the callee.
 	     * @return {respoke.Call}
 	     */
 	    that.startVideoCall = function (params) {
@@ -8940,11 +8947,11 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * relay servers. If it cannot flow through relay servers, the call will fail.
 	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
 	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {*} [params.metadata] - Metadata to be attached to the phone call, accessible by the callee.
 	     * @return {respoke.Call}
 	     */
 	    that.startPhoneCall = function (params) {
-	        var promise;
-	        var call = null;
+	        var call;
 	        var recipient = {};
 	        params = params || {};
 	        params.constraints = [{
@@ -8983,6 +8990,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	            signalParams.recipient = recipient;
 	            signalParams.toType = params.toType;
 	            signalParams.fromType = params.fromType;
+	            signalParams.metadata = params.metadata;
 
 	            // using hasOwnProperty here because callerId could be explicitly set to null or empty string
 	            if (params.hasOwnProperty('callerId')) {
@@ -9008,7 +9016,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	        };
 	        params.signalConnected = function (signalParams) {
 	            signalParams.target = 'call';
-	            signalParams.connectionId = signalParams.connectionId;
 	            signalParams.recipient = recipient;
 	            signalParams.toType = params.toType;
 	            signalParams.fromType = params.fromType;
@@ -9049,7 +9056,7 @@ return /******/ (function(modules) { // webpackBootstrap
 
 	        params.signalingChannel = that.signalingChannel;
 	        call = respoke.Call(params);
-	        addCall({call: call});
+	        addCall({ call: call });
 	        return call;
 	    };
 
@@ -9094,11 +9101,11 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * relay servers. If it cannot flow through relay servers, the call will fail.
 	     * @param {boolean} [params.disableTurn] - If true, media is not allowed to flow through relay servers; it is
 	     * required to flow peer-to-peer. If it cannot, the call will fail.
+	     * @param {*} [params.metadata] - Metadata to be attached to the SIP call, accessible by the callee.
 	     * @return {respoke.Call}
 	     */
 	    that.startSIPCall = function (params) {
-	        var promise;
-	        var call = null;
+	        var call;
 	        var recipient = {};
 	        params = params || {};
 	        params.constraints = [{
@@ -9138,6 +9145,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	            signalParams.recipient = recipient;
 	            signalParams.toType = params.toType;
 	            signalParams.fromType = params.fromType;
+	            signalParams.metadata = params.metadata;
 
 	            // using hasOwnProperty here because callerId could be explicitly set to null or empty string
 	            if (params.hasOwnProperty('callerId')) {
@@ -9163,7 +9171,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	        };
 	        params.signalConnected = function (signalParams) {
 	            signalParams.target = 'call';
-	            signalParams.connectionId = signalParams.connectionId;
 	            signalParams.recipient = recipient;
 	            signalParams.toType = params.toType;
 	            signalParams.fromType = params.fromType;
@@ -9204,7 +9211,7 @@ return /******/ (function(modules) { // webpackBootstrap
 
 	        params.signalingChannel = that.signalingChannel;
 	        call = respoke.Call(params);
-	        addCall({call: call});
+	        addCall({ call: call });
 	        return call;
 	    };
 
@@ -10351,6 +10358,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * required to flow peer-to-peer. If it cannot, the call will fail.
 	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
 	     * all connections belonging to this endpoint.
+	     * @param {*} [params.metadata] - Metadata to be attached to the audio call, accessible by the callee.
 	     * @returns {respoke.Call}
 	     */
 	    that.startAudioCall = function (params) {
@@ -10408,6 +10416,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * required to flow peer-to-peer. If it cannot, the call will fail.
 	     * @param {string} [params.connectionId] - The connection ID of the remoteEndpoint, if it is not desired to call
 	     * all connections belonging to this endpoint.
+	     * @param {*} [params.metadata] - Metadata to be attached to the video call, accessible by the callee.
 	     * @returns {respoke.Call}
 	     */
 	    that.startVideoCall = function (params) {
@@ -10473,6 +10482,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * all connections belonging to this endpoint.
 	     * @param {string} [params.source] - Pass in what type of mediaSource you want. If omitted, you'll have access
 	     * to both the screen and windows. In firefox, you'll have access to the screen only.
+	     * @param {*} [params.metadata] - Metadata to be attached to the screenShare, accessible by the callee.
 	     * @returns {respoke.Call}
 	     */
 	    that.startScreenShare = function (params) {
@@ -10566,10 +10576,11 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * video attached to it.
 	     * @param {HTMLVideoElement} [params.videoRemoteElement] - Pass in an optional html video element to have remote
 	     * video attached to it.
+	     * @param {*} [params.metadata] - Metadata to be attached to the call, accessible by the callee.
 	     * @returns {respoke.Call}
 	     */
 	    that.startCall = function (params) {
-	        var call = null;
+	        var call;
 	        params = params || {};
 
 	        params.constraints = respoke.convertConstraints(params.constraints, [{
@@ -10610,6 +10621,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	            signalParams.signalType = 'offer';
 	            signalParams.target = params.target;
 	            signalParams.recipient = that;
+	            signalParams.metadata = params.metadata;
 
 	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
 	        };
@@ -10740,6 +10752,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	            signalParams.signalType = 'offer';
 	            signalParams.target = 'directConnection';
 	            signalParams.recipient = that;
+	            signalParams.metadata = params.metadata;
 
 	            signalingChannel.sendSDP(signalParams).done(onSuccess, onError);
 	        };
@@ -11063,27 +11076,25 @@ return /******/ (function(modules) { // webpackBootstrap
 	    "use strict";
 	    params = params || {};
 	    var that = {};
+
 	    /**
 	     * Attributes without which we cannot build a signaling message.
 	     * @memberof! respoke.SignalingMessage
 	     * @name required
 	     * @private
-	     * @type {string}
 	     */
-	    var required = ['recipient', 'signalType', 'sessionId', 'target', 'signalId'];
+	    var required = ['signalType', 'sessionId', 'target', 'signalId'];
+
 	    /**
 	     * Attributes which we will copy onto the signal if defined.
 	     * @memberof! respoke.SignalingMessage
 	     * @name required
 	     * @private
-	     * @type {string}
 	     */
-	    var allowed = [
-	        'signalType', 'sessionId', 'sessionDescription', 'iceCandidates', 'offering', 'target', 'signalId', 'callerId',
-	        'requesting', 'reason', 'error', 'status', 'connectionId', 'version', 'finalCandidates'
+	    var optional = [
+	        'sessionDescription', 'iceCandidates', 'offering', 'callerId', 'requesting',
+	        'reason', 'error', 'status', 'connectionId', 'finalCandidates', 'metadata'
 	    ];
-
-	    params.version = '1.0';
 
 	    /**
 	     * Parse rawMessage and set attributes required for message delivery.
@@ -11108,13 +11119,14 @@ return /******/ (function(modules) { // webpackBootstrap
 	            }
 	        } else {
 	            required.forEach(function eachAttr(attr) {
-	                if (params[attr] === 0 || !params[attr]) {
+	                if (!params.hasOwnProperty(attr)) {
 	                    throw new Error("Can't build a signaling without " + attr);
 	                }
+	                that[attr] = params[attr];
 	            });
 
-	            allowed.forEach(function eachAttr(attr) {
-	                if (params[attr] === 0 || params[attr]) {
+	            optional.forEach(function eachAttr(attr) {
+	                if (params.hasOwnProperty(attr)) {
 	                    that[attr] = params[attr];
 	                }
 	            });
@@ -11122,6 +11134,9 @@ return /******/ (function(modules) { // webpackBootstrap
 	    }
 
 	    parse();
+
+	    that.version = '1.0';
+
 	    return that;
 	}; // End respoke.SignalingMessage
 
@@ -12970,7 +12985,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @memberof! respoke.SignalingChannel
 	     * @method respoke.SignalingChannel.routeSignal
 	     * @private
-	     * @param {respoke.SignalingMessage} message - A message to route
+	     * @param {respoke.SignalingMessage} signal - A message to route
 	     * @fires respoke.Call#offer
 	     * @fires respoke.Call#connected
 	     * @fires respoke.Call#answer
@@ -12990,13 +13005,14 @@ return /******/ (function(modules) { // webpackBootstrap
 	            log.debug(signal.signalType, signal);
 	        }
 
-	        if (signal.target === undefined) {
-	            throw new Error("target undefined");
-	        }
-
 	        // Only create if this signal is an offer.
-	        Q.fcall(function makePromise() {
+	        return Q().then(function () {
 	            var endpoint;
+
+	            if (signal.target === undefined) {
+	                throw new Error("target undefined");
+	            }
+
 	            /*
 	             * This will return calls regardless of whether they are associated
 	             * with a direct connection or not, and it will create a call if no
@@ -13013,7 +13029,8 @@ return /******/ (function(modules) { // webpackBootstrap
 	                conferenceId: signal.conferenceId,
 	                type: signal.fromType,
 	                create: (signal.target !== 'directConnection' && signal.signalType === 'offer'),
-	                callerId: signal.callerId
+	                callerId: signal.callerId,
+	                metadata: signal.metadata
 	            });
 	            if (target) {
 	                return target;
@@ -13033,10 +13050,11 @@ return /******/ (function(modules) { // webpackBootstrap
 	                return endpoint.startDirectConnection({
 	                    id: signal.sessionId,
 	                    create: (signal.signalType === 'offer'),
-	                    caller: (signal.signalType !== 'offer')
+	                    caller: (signal.signalType !== 'offer'),
+	                    metadata: signal.metadata
 	                });
 	            }
-	        }).done(function successHandler(target) {
+	        }).then(function successHandler(target) {
 	            // target might be null, a Call, or a DirectConnection.
 	            if (target) {
 	                target = target.call || target;
@@ -13052,7 +13070,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	                call: target,
 	                signal: signal
 	            });
-	        }, null);
+	        });
 	    };
 
 	    /**
@@ -13228,6 +13246,25 @@ return /******/ (function(modules) { // webpackBootstrap
 	            handlerQueue[params.type].push(params.handler);
 	        }
 	    };
+
+	    function socketOnSignal(message) {
+	        var knownSignals = ['offer', 'answer', 'connected', 'modify', 'iceCandidates', 'bye'];
+	        var signal = respoke.SignalingMessage({
+	            rawMessage: message
+	        });
+
+	        if (signal.signalType === 'ack') {
+	            return;
+	        }
+
+	        if (!signal.target || !signal.signalType || knownSignals.indexOf(signal.signalType) === -1) {
+	            log.error("Got malformed signal.", signal);
+	            throw new Error("Can't route signal without target or type.");
+	        }
+
+	        that.routeSignal(signal).done();
+	    }
+	    that.socketOnSignal = socketOnSignal;
 
 	    /**
 	     * Socket handler for pub-sub messages.
@@ -13631,6 +13668,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	        that.socket.on('pubsub', socketOnPubSub);
 	        that.socket.on('message', socketOnMessage);
 	        that.socket.on('presence', socketOnPresence);
+	        that.socket.on('signal', socketOnSignal);
 
 	        // connection timeout
 	        that.socket.on('connect_failed', function connectFailedHandler(res) {
@@ -13643,27 +13681,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	        that.socket.on('error', function errorHandler(res) {
 	            log.error('Socket.io error.', res || "");
 	            reconnect();
-	        });
-
-	        that.addHandler({
-	            type: 'signal',
-	            handler: function signalHandler(message) {
-	                var knownSignals = ['offer', 'answer', 'connected', 'modify', 'iceCandidates', 'bye'];
-	                var signal = respoke.SignalingMessage({
-	                    rawMessage: message
-	                });
-
-	                if (signal.signalType === 'ack') {
-	                    return;
-	                }
-
-	                if (!signal.target || !signal.signalType || knownSignals.indexOf(signal.signalType) === -1) {
-	                    log.error("Got malformed signal.", signal);
-	                    throw new Error("Can't route signal without target or type.");
-	                }
-
-	                that.routeSignal(signal);
-	            }
 	        });
 
 	        that.socket.on('disconnect', function onDisconnect() {
@@ -14467,13 +14484,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @private
 	     */
 	    var dataChannel = null;
-	    /**
-	     * @memberof! respoke.DirectConnection
-	     * @name client
-	     * @type {respoke.Client}
-	     * @private
-	     */
-	    var client = respoke.getClient(instanceId);
 
 	    /**
 	     * @memberof! respoke.DirectConnection
@@ -17879,13 +17889,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @type {respoke.DirectConnection}
 	     */
 	    var directConnection = null;
-	    /**
-	     * @memberof! respoke.Call
-	     * @name toSendHangup
-	     * @private
-	     * @type {boolean}
-	     */
-	    var toSendHangup = null;
 
 	    /**
 	     * Set up promises. If we're not the caller, we need to listen for approval AND the remote SDP to come in
@@ -17944,14 +17947,12 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * @fires respoke.Call#stats
 	     */
 	    function saveParameters(params) {
-	        var isNewConstraint;
-
-	        /* This happens when the call is hung up automatically, for instance due to the lack of an onCall
-	         * handler. In this case, pc has been set to null in hangup. The call has already failed, and the
-	         * invocation of this function is an artifact of async code not being finished yet, so we can just
-	         * skip all of this setup.
-	         */
 	        if (!pc) {
+	            /* This happens when the call is hung up automatically, for instance due to the lack of an onCall
+	             * handler. In this case, pc has been set to null in hangup. The call has already failed, and the
+	             * invocation of this function is an artifact of async code not being finished yet, so we can just
+	             * skip all of this setup.
+	             */
 	            return;
 	        }
 
