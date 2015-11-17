@@ -192,7 +192,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	var EventEmitter = __webpack_require__(4);
 	var respoke = module.exports = EventEmitter({
 	    ridiculous: false, // print every websocket tx/rx
-	    buildNumber: 'v1.55.0',
+	    buildNumber: 'v1.55.1',
 	    streams: [],
 	    io: __webpack_require__(6),
 	    Q: __webpack_require__(8)
@@ -15395,10 +15395,26 @@ return /******/ (function(modules) { // webpackBootstrap
 	        states: {
 	            buffering: {
 	                localIceCandidate: {action: collectLocalIceCandidate},
-	                ready: {
+	                ready: [{
+	                    guard: function () {
+	                        return localCandidatesRemaining() === 0 && localCandidatesComplete;
+	                    },
+	                    target: 'finished',
+	                    action: function () {
+	                        log.error('ice completed without any candidates');
+	                    }
+	                }, {
+	                    guard: function () {
+	                        return localCandidatesRemaining() === 0 && !localCandidatesComplete;
+	                    },
+	                    target: 'waiting'
+	                }, {
+	                    guard: function () {
+	                        return localCandidatesRemaining() !== 0;
+	                    },
 	                    target: 'sending',
 	                    action: sendRemainingCandidates
-	                }
+	                }]
 	            },
 	            sending: {
 	                localIceCandidate: {action: collectLocalIceCandidate},
