@@ -192,7 +192,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	var EventEmitter = __webpack_require__(4);
 	var respoke = module.exports = EventEmitter({
 	    ridiculous: false, // print every websocket tx/rx
-	    buildNumber: 'v1.55.1',
+	    buildNumber: 'v1.56.0',
 	    streams: [],
 	    io: __webpack_require__(6),
 	    Q: __webpack_require__(8)
@@ -968,6 +968,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	* Licensed under the MIT license.
 	*/
 	(function (root, definition) {
+	    "use strict";
 	    if (typeof module === 'object' && module.exports && "function" === 'function') {
 	        module.exports = definition();
 	    } else if (true) {
@@ -976,7 +977,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	        root.log = definition();
 	    }
 	}(this, function () {
-	    var self = {};
+	    "use strict";
 	    var noop = function() {};
 	    var undefinedType = "undefined";
 
@@ -1008,13 +1009,31 @@ return /******/ (function(modules) { // webpackBootstrap
 	        }
 	    }
 
-	    function enableLoggingWhenConsoleArrives(methodName, level) {
+	    // these private functions always need `this` to be set properly
+
+	    function enableLoggingWhenConsoleArrives(methodName, level, loggerName) {
 	        return function () {
 	            if (typeof console !== undefinedType) {
-	                replaceLoggingMethods(level);
-	                self[methodName].apply(self, arguments);
+	                replaceLoggingMethods.call(this, level, loggerName);
+	                this[methodName].apply(this, arguments);
 	            }
 	        };
+	    }
+
+	    function replaceLoggingMethods(level, loggerName) {
+	        /*jshint validthis:true */
+	        for (var i = 0; i < logMethods.length; i++) {
+	            var methodName = logMethods[i];
+	            this[methodName] = (i < level) ?
+	                noop :
+	                this.methodFactory(methodName, level, loggerName);
+	        }
+	    }
+
+	    function defaultMethodFactory(methodName, level, loggerName) {
+	        /*jshint validthis:true */
+	        return realMethod(methodName) ||
+	               enableLoggingWhenConsoleArrives.apply(this, arguments);
 	    }
 
 	    var logMethods = [
@@ -1025,98 +1044,145 @@ return /******/ (function(modules) { // webpackBootstrap
 	        "error"
 	    ];
 
-	    function replaceLoggingMethods(level) {
-	        for (var i = 0; i < logMethods.length; i++) {
-	            var methodName = logMethods[i];
-	            self[methodName] = (i < level) ? noop : self.methodFactory(methodName, level);
-	        }
-	    }
+	    function Logger(name, defaultLevel, factory) {
+	      var self = this;
+	      var currentLevel;
+	      var storageKey = "loglevel";
+	      if (name) {
+	        storageKey += ":" + name;
+	      }
 
-	    function persistLevelIfPossible(levelNum) {
-	        var levelName = (logMethods[levelNum] || 'silent').toUpperCase();
+	      function persistLevelIfPossible(levelNum) {
+	          var levelName = (logMethods[levelNum] || 'silent').toUpperCase();
 
-	        // Use localStorage if available
-	        try {
-	            window.localStorage['loglevel'] = levelName;
-	            return;
-	        } catch (ignore) {}
+	          // Use localStorage if available
+	          try {
+	              window.localStorage[storageKey] = levelName;
+	              return;
+	          } catch (ignore) {}
 
-	        // Use session cookie as fallback
-	        try {
-	            window.document.cookie = "loglevel=" + levelName + ";";
-	        } catch (ignore) {}
-	    }
+	          // Use session cookie as fallback
+	          try {
+	              window.document.cookie =
+	                encodeURIComponent(storageKey) + "=" + levelName + ";";
+	          } catch (ignore) {}
+	      }
 
-	    function loadPersistedLevel() {
-	        var storedLevel;
+	      function getPersistedLevel() {
+	          var storedLevel;
 
-	        try {
-	            storedLevel = window.localStorage['loglevel'];
-	        } catch (ignore) {}
+	          try {
+	              storedLevel = window.localStorage[storageKey];
+	          } catch (ignore) {}
 
-	        if (typeof storedLevel === undefinedType) {
-	            try {
-	                storedLevel = /loglevel=([^;]+)/.exec(window.document.cookie)[1];
-	            } catch (ignore) {}
-	        }
-	        
-	        if (self.levels[storedLevel] === undefined) {
-	            storedLevel = "WARN";
-	        }
+	          if (typeof storedLevel === undefinedType) {
+	              try {
+	                  var cookie = window.document.cookie;
+	                  var location = cookie.indexOf(
+	                      encodeURIComponent(storageKey) + "=");
+	                  if (location) {
+	                      storedLevel = /^([^;]+)/.exec(cookie.slice(location))[1];
+	                  }
+	              } catch (ignore) {}
+	          }
 
-	        self.setLevel(self.levels[storedLevel]);
+	          // If the stored level is not valid, treat it as if nothing was stored.
+	          if (self.levels[storedLevel] === undefined) {
+	              storedLevel = undefined;
+	          }
+
+	          return storedLevel;
+	      }
+
+	      /*
+	       *
+	       * Public API
+	       *
+	       */
+
+	      self.levels = { "TRACE": 0, "DEBUG": 1, "INFO": 2, "WARN": 3,
+	          "ERROR": 4, "SILENT": 5};
+
+	      self.methodFactory = factory || defaultMethodFactory;
+
+	      self.getLevel = function () {
+	          return currentLevel;
+	      };
+
+	      self.setLevel = function (level, persist) {
+	          if (typeof level === "string" && self.levels[level.toUpperCase()] !== undefined) {
+	              level = self.levels[level.toUpperCase()];
+	          }
+	          if (typeof level === "number" && level >= 0 && level <= self.levels.SILENT) {
+	              currentLevel = level;
+	              if (persist !== false) {  // defaults to true
+	                  persistLevelIfPossible(level);
+	              }
+	              replaceLoggingMethods.call(self, level, name);
+	              if (typeof console === undefinedType && level < self.levels.SILENT) {
+	                  return "No console available for logging";
+	              }
+	          } else {
+	              throw "log.setLevel() called with invalid level: " + level;
+	          }
+	      };
+
+	      self.setDefaultLevel = function (level) {
+	          if (!getPersistedLevel()) {
+	              self.setLevel(level, false);
+	          }
+	      };
+
+	      self.enableAll = function(persist) {
+	          self.setLevel(self.levels.TRACE, persist);
+	      };
+
+	      self.disableAll = function(persist) {
+	          self.setLevel(self.levels.SILENT, persist);
+	      };
+
+	      // Initialize with the right level
+	      var initialLevel = getPersistedLevel();
+	      if (initialLevel == null) {
+	          initialLevel = defaultLevel == null ? "WARN" : defaultLevel;
+	      }
+	      self.setLevel(initialLevel, false);
 	    }
 
 	    /*
 	     *
-	     * Public API
+	     * Package-level API
 	     *
 	     */
 
-	    self.levels = { "TRACE": 0, "DEBUG": 1, "INFO": 2, "WARN": 3,
-	        "ERROR": 4, "SILENT": 5};
+	    var defaultLogger = new Logger();
 
-	    self.methodFactory = function (methodName, level) {
-	        return realMethod(methodName) ||
-	               enableLoggingWhenConsoleArrives(methodName, level);
-	    };
-
-	    self.setLevel = function (level) {
-	        if (typeof level === "string" && self.levels[level.toUpperCase()] !== undefined) {
-	            level = self.levels[level.toUpperCase()];
+	    var _loggersByName = {};
+	    defaultLogger.getLogger = function getLogger(name) {
+	        if (typeof name !== "string" || name === "") {
+	          throw new TypeError("You must supply a name when creating a logger.");
 	        }
-	        if (typeof level === "number" && level >= 0 && level <= self.levels.SILENT) {
-	            persistLevelIfPossible(level);
-	            replaceLoggingMethods(level);
-	            if (typeof console === undefinedType && level < self.levels.SILENT) {
-	                return "No console available for logging";
-	            }
-	        } else {
-	            throw "log.setLevel() called with invalid level: " + level;
+
+	        var logger = _loggersByName[name];
+	        if (!logger) {
+	          logger = _loggersByName[name] = new Logger(
+	            name, defaultLogger.getLevel(), defaultLogger.methodFactory);
 	        }
-	    };
-
-	    self.enableAll = function() {
-	        self.setLevel(self.levels.TRACE);
-	    };
-
-	    self.disableAll = function() {
-	        self.setLevel(self.levels.SILENT);
+	        return logger;
 	    };
 
 	    // Grab the current global log variable in case of overwrite
 	    var _log = (typeof window !== undefinedType) ? window.log : undefined;
-	    self.noConflict = function() {
+	    defaultLogger.noConflict = function() {
 	        if (typeof window !== undefinedType &&
-	               window.log === self) {
+	               window.log === defaultLogger) {
 	            window.log = _log;
 	        }
 
-	        return self;
+	        return defaultLogger;
 	    };
 
-	    loadPersistedLevel();
-	    return self;
+	    return defaultLogger;
 	}));
 
 
@@ -5642,8 +5708,22 @@ return /******/ (function(modules) { // webpackBootstrap
 	        }
 
 	    // <script>
-	    } else if (typeof self !== "undefined") {
-	        self.Q = definition();
+	    } else if (typeof window !== "undefined" || typeof self !== "undefined") {
+	        // Prefer window over self for add-on scripts. Use self for
+	        // non-windowed contexts.
+	        var global = typeof window !== "undefined" ? window : self;
+
+	        // Get the `window` object, save the previous Q global
+	        // and initialize Q as a global.
+	        var previousQ = global.Q;
+	        global.Q = definition();
+
+	        // Add a noConflict function so Q can be removed from the
+	        // global namespace.
+	        global.Q.noConflict = function () {
+	            global.Q = previousQ;
+	            return this;
+	        };
 
 	    } else {
 	        throw new Error("This environment was not anticipated by Q. Please file a bug.");
@@ -7609,6 +7689,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	    }
 	};
 
+	Q.noConflict = function() {
+	    throw new Error("Q.noConflict only works when Q is used as a global");
+	};
+
 	// All code before this point will be filtered from stack traces.
 	var qEndingLine = captureLine();
 
@@ -8510,7 +8594,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     *         onConnect: function (evt) {}
 	     *     });
 	     *
-	     * @memberof! respoke.Client
+	     * @memberof respoke.Client
 	     * @method respoke.Client.joinConference
 	     * @private
 	     * @param {object} params
@@ -9593,6 +9677,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	     * ```
 	     * @memberof respoke.Client
 	     * @method respoke.Client.getConferenceParticipants
+	     * @private
 	     * @param object {params}
 	     * @param string {params.id}
 	     * @returns {Promise}
