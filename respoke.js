@@ -192,7 +192,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	var EventEmitter = __webpack_require__(4);
 	var respoke = module.exports = EventEmitter({
 	    ridiculous: false, // print every websocket tx/rx
-	    buildNumber: 'v1.56.0',
+	    buildNumber: 'v1.57.0',
 	    streams: [],
 	    io: __webpack_require__(6),
 	    Q: __webpack_require__(8)
